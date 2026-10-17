@@ -1,0 +1,14 @@
+idf_component_register(
+    SRCS
+        "src/bsp_audio.c"
+        "src/bsp_display.c"
+        "src/bsp_power_key.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        driver
+        esp_lcd
+        esp_adc
+        esp_partition
+        app_update
+)

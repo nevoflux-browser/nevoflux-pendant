@@ -1,0 +1,21 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "app_state.c"
+        "audio_in.c"
+        "audio_out.c"
+        "relay_ws.c"
+        "token_mgr.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        bsp_143c
+        nf_proto
+        prov_nvs
+        esp_http_client
+        esp_websocket_client
+        esp_wifi
+        esp_event
+        esp_netif
+        esp_timer
+)

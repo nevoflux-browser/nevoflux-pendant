@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "src/nfa1.c"
+        "src/nfm1.c"
+        "src/wav_header.c"
+        "src/wire_seq.c"
+        "src/nf_crypto.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        mbedtls
+        json
+)

@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "ble_prov.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        bsp_143c
+        prov_nvs
+        app_update
+        esp_partition
+        bt
+)
