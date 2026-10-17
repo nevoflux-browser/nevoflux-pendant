@@ -91,3 +91,5 @@ eval/reports/
 
 .superpowers/
 
+# Simulator binary
+tools/sim/nevoflux_sim

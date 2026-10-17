@@ -30,7 +30,8 @@ nevoflux-pendant/
 │   └── nevoflux/                  # ota_1 partition: NevoFlux private voice client (BLE disabled, dual-core PSRAM architecture)
 └── tools/
     ├── provision/                 # Python 3 CLI: Device Grant + Argon2id(m=65536,t=3,p=4) KDF + USB Serial injection
-    └── pack_storage/              # Pack shared storage partition image (20px CJK bitmap font + ESP-SR VAD model)
+    ├── pack_storage/              # Pack shared storage partition image (20px CJK bitmap font + ESP-SR VAD model)
+    └── sim/                       # 1.43" (466×466) round AMOLED UI simulator (SDL2 desktop + Web UI)
 ```
 
 ## 8MB Flash Partition Table (`partitions.csv`)
@@ -55,7 +56,19 @@ All wire codecs (`NFA1`, `NFM1`, WAV header parser, `SequenceTracker`), AES-256-
 make test
 ```
 
-### 2. Provision WiFi & NevoFlux Pairing Credentials
+### 2. Launch the 1.43" (466×466) Circular AMOLED UI Simulator
+
+You can preview and interact with the Launcher (`factory`), Push-to-Talk (`PTT`), TTS Playback (`24kHz` / `48kHz`), and Meeting Mode UIs on Linux via either the Web Simulator or the native SDL2 desktop app:
+
+```bash
+# Start interactive Web Simulator on http://localhost:8765
+make sim-web
+
+# Or run the native SDL2 desktop window
+make -C tools/sim run-sdl
+```
+
+### 3. Provision WiFi & NevoFlux Pairing Credentials
 
 Run `/pair-device` on your NevoFlux desktop daemon to get a pairing code, then connect the pendant via USB:
 
@@ -70,7 +83,7 @@ python3 tools/provision/provision.py \
 - The tool performs an independent **Device Authorization Grant** (minting a dedicated 7-day `account_token` for the pendant so it can be revoked independently if lost) and derives the 32-byte AES-256-GCM keys on the host using `Argon2id (m=65536, t=3, p=4)`.
 - When prompted on the pendant screen, **click the `BOOT` button once within 15 seconds** to confirm physical presence and commit the credentials to NVS.
 
-### 3. Build & Flash ESP32-S3 Firmware (ESP-IDF)
+### 4. Build & Flash ESP32-S3 Firmware (ESP-IDF)
 
 ```bash
 # 1. Pack shared storage image (CJK font + VAD model)
@@ -92,3 +105,4 @@ esptool.py --chip esp32s3 write_flash \
 ## License
 
 Licensed under the [Apache License, Version 2.0](file:///ai/project/nevoflux-pendant/LICENSE).
+
