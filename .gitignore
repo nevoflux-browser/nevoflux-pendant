@@ -53,3 +53,41 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# ESP-IDF
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# 
+secrets/
+*.pem
+*.key
+
+CLAUDE.md
+.claude
+docs/plans/
+docs/superpowers/
+docs/testing/
+*.plan
+*_plan.md
+AGENT.md
+
+# Git worktrees
+.worktrees/
+
+# Downloaded embedding models (use `just download-model` to fetch)
+# Anchored to repo root so it doesn't shadow source dirs like
+# crates/storage/src/models/.
+/models/
+
+# Spike workspace (throwaway exploration; see spike/knowledge-base-v1 branch)
+spike/
+
+# Eval run reports (generated artifacts; keep eval/benchmarks tracked)
+eval/reports/
+
+.superpowers/
+
