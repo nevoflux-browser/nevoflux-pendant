@@ -86,6 +86,25 @@ int main(void)
     assert(strcmp(loaded_cred.data_channel_id, "fedcba9876543210fedcba9876543210") == 0);
     assert(loaded_cred.data_key[0] == 0x22U && loaded_cred.data_key[31] == 0x22U);
 
+    /* 7. Verify Muse RFC 8628 credential NVS persistence (muse_cfg namespace) */
+    muse_credentials_t muse_cred = {0};
+    assert(!prov_nvs_load_muse_cfg(&muse_cred));
+    snprintf(muse_cred.access_token, sizeof(muse_cred.access_token), "mgst_oauth2_device_token_xyz");
+    snprintf(muse_cred.refresh_token, sizeof(muse_cred.refresh_token), "mgrt_refresh_token_123");
+    snprintf(muse_cred.device_id, sizeof(muse_cred.device_id), "MuseGadget-A1B2C3");
+    assert(prov_nvs_save_muse_cfg(&muse_cred));
+
+    muse_credentials_t loaded_muse = {0};
+    assert(prov_nvs_load_muse_cfg(&loaded_muse));
+    assert(loaded_muse.is_authorized);
+    assert(strcmp(loaded_muse.access_token, "mgst_oauth2_device_token_xyz") == 0);
+    assert(strcmp(loaded_muse.refresh_token, "mgrt_refresh_token_123") == 0);
+    assert(strcmp(loaded_muse.device_id, "MuseGadget-A1B2C3") == 0);
+
+    assert(prov_nvs_clear_muse_cfg());
+    assert(!prov_nvs_load_muse_cfg(&loaded_muse));
+
     printf("[PASS] All prov_nvs unit tests passed!\n");
     return 0;
 }
+

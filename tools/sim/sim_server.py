@@ -152,13 +152,15 @@ HTML_PAGE = """<!DOCTYPE html>
       <button onclick="api('/api/pwr_click')">按 PWR 键 (取消/停止)</button>
     </div>
 
-    <h2>2. 模拟 Daemon 下行事件与配对注入</h2>
+    <h2>2. 模拟 Daemon / Muse OAuth2 (RFC 8628) 事件</h2>
     <div class="btn-row">
       <button onclick="api('/api/sim_partial')">推 speech_partial (流式转写)</button>
       <button onclick="api('/api/sim_final')">推 speech_final (定稿触发 send)</button>
       <button onclick="api('/api/sim_tts_24k')">推 24kHz TTS (Kokoro 播报)</button>
       <button onclick="api('/api/sim_tts_48k')">推 48kHz TTS (MOSS 播报)</button>
       <button onclick="api('/api/sim_prov_offer')">发起 USB prov.offer 配对请求</button>
+      <button onclick="api('/api/sim_muse_qr')">进入 Muse (ota_0) RFC 8628 二维码授权</button>
+      <button onclick="api('/api/sim_muse_auth_ok')">模拟浏览器完成 Muse 授权 (存 NVS)</button>
       <button onclick="api('/api/reset_launcher')">重启回 Launcher (factory)</button>
     </div>
 
@@ -216,6 +218,7 @@ class SimEngine:
         self.lib.sim_inject_tts_asset.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
         self.lib.sim_inject_prov_line.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
         self.lib.sim_inject_prov_line.restype = ctypes.c_int
+        self.lib.sim_muse_complete_oauth.argtypes = []
         self.lib.sim_render_png.argtypes = [ctypes.c_char_p]
         self.lib.sim_render_png.restype = ctypes.c_bool
         self.lib.sim_get_state_json.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
@@ -323,6 +326,10 @@ def run_server(port: int) -> None:
                     engine.lib.sim_inject_prov_line(
                         b'{"cmd":"prov.offer","device":"Sam-ThinkPad"}', resp, 256
                     )
+                elif parsed.path == "/api/sim_muse_qr":
+                    engine.lib.sim_init(2)
+                elif parsed.path == "/api/sim_muse_auth_ok":
+                    engine.lib.sim_muse_complete_oauth()
                 elif parsed.path == "/api/reset_launcher":
                     engine.lib.sim_init(0)
 

@@ -91,5 +91,7 @@ eval/reports/
 
 .superpowers/
 
-# Simulator binary
+# Simulator binary & Python bytecode
 tools/sim/nevoflux_sim
+__pycache__/
+*.pyc

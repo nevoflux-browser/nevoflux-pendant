@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "bsp_143c.h"
+#include "muse_oauth_device.h"
 #include "nevoflux_app.h"
 #include "nf_proto.h"
 #include "prov_nvs.h"
@@ -35,22 +36,55 @@ typedef enum {
 } sim_partition_t;
 
 typedef struct {
-    sim_partition_t  active_partition;
-    pendant_config_t pendant_cfg;
-    nf_credentials_t nf_cred;
-    prov_rpc_ctx_t   prov_rpc;
-    nf_app_ctx_t     nevo_app;
-    bsp_key_fsm_t    key_fsm;
+    sim_partition_t   active_partition;
+    pendant_config_t  pendant_cfg;
+    nf_credentials_t  nf_cred;
+    prov_rpc_ctx_t    prov_rpc;
+    nf_app_ctx_t      nevo_app;
+    muse_device_ctx_t muse_app;
+    bsp_key_fsm_t     key_fsm;
 
-    uint64_t         now_ms;
-    bool             boot_held;
-    bool             daemon_online;
-    char             launcher_prompt[160];
-    char             last_tx_json[512];
-    uint32_t         tx_json_count;
+    uint64_t          now_ms;
+    bool              boot_held;
+    bool              daemon_online;
+    char              launcher_prompt[160];
+    char              last_tx_json[512];
+    uint32_t          tx_json_count;
 } sim_context_t;
 
 static sim_context_t g_sim;
+
+static void start_muse_rfc8628_flow(void)
+{
+    const char *code_resp =
+        "{"
+        "\"device_code\":\"muse_dev_code_889900\","
+        "\"user_code\":\"ABC-123\","
+        "\"verification_uri\":\"muse.ai/link\","
+        "\"verification_uri_complete\":\"https://muse.ai/link?code=ABC-123\","
+        "\"expires_in\":900,"
+        "\"interval\":5"
+        "}";
+    (void)muse_oauth_on_device_code_resp(&g_sim.muse_app, code_resp, g_sim.now_ms);
+}
+
+void sim_muse_complete_oauth(void)
+{
+    g_sim.active_partition = SIM_PARTITION_MUSE;
+    if (g_sim.muse_app.auth_state != MUSE_AUTH_WAIT_USER_VERIFY) {
+        start_muse_rfc8628_flow();
+    }
+    const char *tok_resp =
+        "{"
+        "\"access_token\":\"mgst_oauth2_device_flow_token_live\","
+        "\"refresh_token\":\"mgrt_refresh_token_live\","
+        "\"device_id\":\"MuseGadget-143C\""
+        "}";
+    (void)muse_oauth_on_token_poll_resp(&g_sim.muse_app, tok_resp, g_sim.now_ms);
+    snprintf(g_sim.muse_app.last_transcript,
+             sizeof(g_sim.muse_app.last_transcript),
+             "OAuth 2.0 (RFC 8628) 授权成功！长效凭证已自动存入 NVS (muse_cfg)。\n按住右侧 BOOT 键即可与 Muse 官方语音助手对话。");
+}
 
 static void on_sim_send_data_json(const char *wire_json, void *user_ctx)
 {
@@ -103,7 +137,7 @@ void sim_init(int initial_partition)
     /* Seed default demo WiFi & pairing state so simulator looks realistic out of the box */
     snprintf(g_sim.pendant_cfg.wifi_ssid, sizeof(g_sim.pendant_cfg.wifi_ssid), "NevoFlux-5G");
     snprintf(g_sim.pendant_cfg.wifi_pass, sizeof(g_sim.pendant_cfg.wifi_pass), "private-voice");
-    g_sim.pendant_cfg.last_system = PENDANT_SYS_NEVOFLUX;
+    g_sim.pendant_cfg.last_system = (initial_partition == 2) ? PENDANT_SYS_MUSE : PENDANT_SYS_NEVOFLUX;
     g_sim.pendant_cfg.has_wifi = true;
     (void)prov_nvs_save_pendant(&g_sim.pendant_cfg);
 
@@ -113,12 +147,19 @@ void sim_init(int initial_partition)
     g_sim.nf_cred.is_paired = true;
     (void)prov_nvs_save_nf_cfg(&g_sim.nf_cred);
 
-    g_sim.active_partition = (initial_partition == 0) ? SIM_PARTITION_LAUNCHER : SIM_PARTITION_NEVOFLUX;
+    g_sim.active_partition = (initial_partition == 0) ? SIM_PARTITION_LAUNCHER
+                           : (initial_partition == 2) ? SIM_PARTITION_MUSE
+                                                      : SIM_PARTITION_NEVOFLUX;
     g_sim.daemon_online = true;
     g_sim.now_ms = 1000ULL;
 
     prov_rpc_init(&g_sim.prov_rpc, on_sim_prov_prompt, on_sim_prov_applied, NULL);
     nf_app_init(&g_sim.nevo_app, 0x20261017U, on_sim_send_data_json, NULL);
+    muse_device_init(&g_sim.muse_app);
+    /* Start RFC 8628 Device Authorization Grant when Muse has no stored token in NVS */
+    if (g_sim.muse_app.auth_state == MUSE_AUTH_UNPAIRED) {
+        start_muse_rfc8628_flow();
+    }
     bsp_key_init(&g_sim.key_fsm);
 
     snprintf(g_sim.launcher_prompt,
@@ -146,6 +187,19 @@ void sim_step_ms(uint32_t delta_ms)
             snprintf(g_sim.nevo_app.screen_transcript,
                      sizeof(g_sim.nevo_app.screen_transcript),
                      "正在聆听…（16kHz PCM16 → NFA1 24B 帧上行中）");
+        }
+    } else if (kev != BSP_KEY_EVENT_NONE && g_sim.active_partition == SIM_PARTITION_MUSE &&
+               g_sim.muse_app.auth_state == MUSE_AUTH_AUTHORIZED) {
+        if (kev == BSP_KEY_EVENT_BOOT_PRESS_START) {
+            g_sim.muse_app.voice_state = MUSE_VOICE_LISTENING;
+            snprintf(g_sim.muse_app.last_transcript,
+                     sizeof(g_sim.muse_app.last_transcript),
+                     "Muse 正在聆听… (muse-gadget-sdk 音频流上行中)");
+        } else if (kev == BSP_KEY_EVENT_BOOT_RELEASE) {
+            g_sim.muse_app.voice_state = MUSE_VOICE_SPEAKING;
+            snprintf(g_sim.muse_app.last_transcript,
+                     sizeof(g_sim.muse_app.last_transcript),
+                     "Muse: 已通过官方 Muse Gadget SDK 收到您的语音指令！");
         }
     }
 
@@ -216,6 +270,9 @@ void sim_touch_xy(int x, int y)
             g_sim.pendant_cfg.last_system = PENDANT_SYS_MUSE;
             (void)prov_nvs_save_pendant(&g_sim.pendant_cfg);
             g_sim.active_partition = SIM_PARTITION_MUSE;
+            if (g_sim.muse_app.auth_state == MUSE_AUTH_UNPAIRED) {
+                start_muse_rfc8628_flow();
+            }
             return;
         }
         /* Right card: NevoFlux (x: 243..421, y: 140..310) */
@@ -229,9 +286,21 @@ void sim_touch_xy(int x, int y)
     }
 
     if (g_sim.active_partition == SIM_PARTITION_MUSE) {
-        /* Bottom button in Muse: Switch System back to Launcher */
-        if (y >= 355 && y <= 415 && x >= 140 && x <= 326) {
-            g_sim.active_partition = SIM_PARTITION_LAUNCHER;
+        /* Bottom buttons in Muse:
+         * Left : [ 模拟完成授权 ] or [ 重新配对 ] (x: 85..225, y: 360..412)
+         * Right: [ 切换系统 ] (x: 241..381, y: 360..412)
+         */
+        if (y >= 360 && y <= 412) {
+            if (x >= 85 && x <= 225) {
+                if (g_sim.muse_app.auth_state != MUSE_AUTH_AUTHORIZED) {
+                    sim_muse_complete_oauth();
+                } else {
+                    (void)muse_device_unpair(&g_sim.muse_app);
+                    start_muse_rfc8628_flow();
+                }
+            } else if (x >= 241 && x <= 381) {
+                g_sim.active_partition = SIM_PARTITION_LAUNCHER;
+            }
         }
         return;
     }
@@ -351,6 +420,49 @@ static void draw_pango_text(cairo_t *cr,
     g_object_unref(layout);
 }
 
+static void draw_qr_code_box(cairo_t *cr, double bx, double by, double size, const char *seed_str)
+{
+    /* White quiet zone rounded card */
+    draw_rounded_rect(cr, bx, by, size, size, 12.0);
+    cairo_set_source_rgb(cr, 0.98, 0.99, 1.0);
+    cairo_fill(cr);
+
+    const int N = 21;
+    double pad = 10.0;
+    double cell = (size - 2.0 * pad) / (double)N;
+    uint32_t h = 2166136261U;
+    if (seed_str) {
+        for (const char *p = seed_str; *p; ++p) {
+            h = (h ^ (uint8_t)(*p)) * 16777619U;
+        }
+    }
+
+    cairo_set_source_rgb(cr, 0.06, 0.08, 0.14);
+    for (int r = 0; r < N; ++r) {
+        for (int c = 0; c < N; ++c) {
+            bool finder = ((r < 7 && c < 7) || (r < 7 && c >= N - 7) || (r >= N - 7 && c < 7));
+            bool on = false;
+            if (finder) {
+                int lr = (r >= N - 7) ? (r - (N - 7)) : r;
+                int lc = (c >= N - 7) ? (c - (N - 7)) : c;
+                if (lr == 0 || lr == 6 || lc == 0 || lc == 6 ||
+                    (lr >= 2 && lr <= 4 && lc >= 2 && lc <= 4)) {
+                    on = true;
+                }
+            } else if ((r == 6 || c == 6)) {
+                on = ((r + c) % 2 == 0);
+            } else {
+                uint32_t bit = ((uint32_t)(r * 31 + c * 17) ^ (h >> ((r + c) % 16))) & 1U;
+                on = (bit != 0U);
+            }
+            if (on) {
+                cairo_rectangle(cr, bx + pad + c * cell, by + pad + r * cell, cell + 0.3, cell + 0.3);
+                cairo_fill(cr);
+            }
+        }
+    }
+}
+
 static void render_launcher_screen(cairo_t *cr)
 {
     /* Top status header inside circular safe zone */
@@ -365,7 +477,7 @@ static void render_launcher_screen(cairo_t *cr)
     draw_pango_text(cr, "NevoFlux Pendant Launcher", "Sans Bold 17", 43, 88, 380, PANGO_ALIGN_CENTER, 0.95, 0.97, 1.0);
     draw_pango_text(cr, "factory (0x20000) · 双系统引导与统一配网", "Sans 11", 43, 114, 380, PANGO_ALIGN_CENTER, 0.45, 0.52, 0.62);
 
-    /* Left Card: ota_0 (Muse) */
+    /* Left Card: ota_0 (Muse Official Gadget SDK) */
     bool muse_sel = (g_sim.pendant_cfg.last_system == PENDANT_SYS_MUSE);
     draw_rounded_rect(cr, 48, 148, 174, 158, 20);
     cairo_set_source_rgba(cr, muse_sel ? 0.16 : 0.08, muse_sel ? 0.14 : 0.10, muse_sel ? 0.28 : 0.14, 1.0);
@@ -376,7 +488,7 @@ static void render_launcher_screen(cairo_t *cr)
 
     draw_pango_text(cr, "ota_0 · 3.0MB", "Sans Bold 11", 58, 166, 154, PANGO_ALIGN_CENTER, 0.68, 0.55, 0.95);
     draw_pango_text(cr, "Muse", "Sans Bold 24", 58, 196, 154, PANGO_ALIGN_CENTER, 0.96, 0.96, 1.0);
-    draw_pango_text(cr, "社区移植版\n直连 Muse 云端", "Sans 12", 58, 238, 154, PANGO_ALIGN_CENTER, 0.65, 0.70, 0.78);
+    draw_pango_text(cr, "官方 Gadget SDK\nRFC 8628 设备授权", "Sans 12", 58, 238, 154, PANGO_ALIGN_CENTER, 0.65, 0.70, 0.78);
 
     /* Right Card: ota_1 (NevoFlux) */
     bool nevo_sel = (g_sim.pendant_cfg.last_system == PENDANT_SYS_NEVOFLUX);
@@ -410,23 +522,163 @@ static void render_launcher_screen(cairo_t *cr)
 
 static void render_muse_screen(cairo_t *cr)
 {
-    draw_pango_text(cr, "ota_0 · Muse 分区 (wupsbr fork)", "Sans Bold 13", 63, 62, 340, PANGO_ALIGN_CENTER, 0.72, 0.58, 0.98);
-    /* Cute animated eyes placeholder for Muse partition */
-    cairo_set_source_rgb(cr, 0.68, 0.48, 0.98);
-    draw_rounded_rect(cr, 135, 160, 68, 90, 30);
-    cairo_fill(cr);
-    draw_rounded_rect(cr, 263, 160, 68, 90, 30);
-    cairo_fill(cr);
-
-    draw_pango_text(cr, "Muse 随身聊天已就绪", "Sans Bold 16", 63, 285, 340, PANGO_ALIGN_CENTER, 0.92, 0.94, 0.98);
-
-    draw_rounded_rect(cr, 140, 358, 186, 48, 24);
-    cairo_set_source_rgba(cr, 0.18, 0.20, 0.28, 1.0);
-    cairo_fill_preserve(cr);
-    cairo_set_source_rgba(cr, 0.45, 0.50, 0.65, 1.0);
-    cairo_set_line_width(cr, 1.5);
+    /* Outer purple/blue glowing ring for Muse Gadget SDK */
+    cairo_new_sub_path(cr);
+    cairo_set_line_width(cr, 4.0);
+    cairo_set_source_rgba(cr, 0.66, 0.45, 0.98, 0.55);
+    cairo_arc(cr, 233.0, 233.0, 224.0, 0.0, 2.0 * M_PI);
     cairo_stroke(cr);
-    draw_pango_text(cr, "切换系统 (回 Launcher)", "Sans Bold 13", 145, 372, 176, PANGO_ALIGN_CENTER, 0.88, 0.92, 0.98);
+
+    draw_pango_text(cr,
+                    "ota_0 · Muse Gadget SDK (官方 ESP32 SDK)",
+                    "Sans Bold 11",
+                    58,
+                    54,
+                    350,
+                    PANGO_ALIGN_CENTER,
+                    0.76,
+                    0.62,
+                    0.98);
+
+    if (g_sim.muse_app.auth_state != MUSE_AUTH_AUTHORIZED) {
+        /* OAuth 2.0 Device Authorization Grant (RFC 8628) Screen */
+        draw_rounded_rect(cr, 78, 82, 310, 36, 18);
+        cairo_set_source_rgba(cr, 0.20, 0.14, 0.34, 0.95);
+        cairo_fill_preserve(cr);
+        cairo_set_line_width(cr, 1.6);
+        cairo_set_source_rgba(cr, 0.68, 0.48, 0.98, 0.9);
+        cairo_stroke(cr);
+        draw_pango_text(cr,
+                        "OAuth 2.0 设备端授权码模式 (RFC 8628)",
+                        "Sans Bold 11",
+                        83,
+                        92,
+                        300,
+                        PANGO_ALIGN_CENTER,
+                        0.88,
+                        0.78,
+                        1.0);
+
+        /* Left: 148x148 Scannable QR Code for verification_uri_complete */
+        draw_qr_code_box(cr, 48, 140, 148, g_sim.muse_app.verification_uri_complete);
+
+        /* Right: Short code card ("请访问 muse.ai/link 并输入代码 ABC-123") */
+        draw_rounded_rect(cr, 210, 140, 210, 148, 18);
+        cairo_set_source_rgba(cr, 0.08, 0.11, 0.17, 0.95);
+        cairo_fill_preserve(cr);
+        cairo_set_line_width(cr, 1.4);
+        cairo_set_source_rgba(cr, 0.28, 0.34, 0.48, 1.0);
+        cairo_stroke(cr);
+
+        draw_pango_text(cr, "手机扫码或浏览器访问", "Sans 11", 218, 152, 194, PANGO_ALIGN_CENTER, 0.64, 0.72, 0.82);
+        draw_pango_text(cr,
+                        g_sim.muse_app.verification_uri[0] ? g_sim.muse_app.verification_uri : "muse.ai/link",
+                        "Sans Bold 15",
+                        218,
+                        172,
+                        194,
+                        PANGO_ALIGN_CENTER,
+                        0.38,
+                        0.85,
+                        0.98);
+        draw_pango_text(cr, "输入设备授权短码：", "Sans 11", 218, 200, 194, PANGO_ALIGN_CENTER, 0.64, 0.72, 0.82);
+
+        /* Highlighted User Code Badge: ABC-123 */
+        draw_rounded_rect(cr, 232, 222, 166, 48, 12);
+        cairo_set_source_rgba(cr, 0.18, 0.14, 0.32, 1.0);
+        cairo_fill_preserve(cr);
+        cairo_set_line_width(cr, 1.8);
+        cairo_set_source_rgba(cr, 0.75, 0.55, 1.0, 1.0);
+        cairo_stroke(cr);
+        draw_pango_text(cr,
+                        g_sim.muse_app.user_code[0] ? g_sim.muse_app.user_code : "ABC-123",
+                        "Monospace Bold 22",
+                        236,
+                        232,
+                        158,
+                        PANGO_ALIGN_CENTER,
+                        0.98,
+                        0.92,
+                        0.42);
+
+        char poll_hint[128];
+        snprintf(poll_hint,
+                 sizeof(poll_hint),
+                 "ESP32 后台轮询认证接口中 (interval=%us)… 授权后自动存入 NVS",
+                 (unsigned)g_sim.muse_app.poll_interval_sec);
+        draw_pango_text(cr, poll_hint, "Sans 11", 56, 306, 354, PANGO_ALIGN_CENTER, 0.58, 0.68, 0.80);
+
+        /* Bottom buttons: [ 模拟完成授权 ] | [ 切换系统 ] */
+        draw_rounded_rect(cr, 85, 360, 140, 48, 24);
+        cairo_set_source_rgba(cr, 0.24, 0.16, 0.42, 1.0);
+        cairo_fill_preserve(cr);
+        cairo_set_line_width(cr, 1.6);
+        cairo_set_source_rgba(cr, 0.72, 0.52, 0.98, 1.0);
+        cairo_stroke(cr);
+        draw_pango_text(cr, "模拟完成授权", "Sans Bold 13", 90, 374, 130, PANGO_ALIGN_CENTER, 0.95, 0.92, 1.0);
+    } else {
+        /* Authorized Muse AI Voice Assistant Screen */
+        draw_rounded_rect(cr, 88, 82, 290, 38, 19);
+        cairo_set_source_rgba(cr, 0.12, 0.26, 0.22, 0.95);
+        cairo_fill_preserve(cr);
+        cairo_set_line_width(cr, 1.8);
+        cairo_set_source_rgba(cr, 0.22, 0.92, 0.65, 0.9);
+        cairo_stroke(cr);
+        draw_pango_text(cr,
+                        "● Muse 已授权连接 (NVS: muse_cfg)",
+                        "Sans Bold 13",
+                        93,
+                        91,
+                        280,
+                        PANGO_ALIGN_CENTER,
+                        0.28,
+                        0.95,
+                        0.68);
+
+        draw_rounded_rect(cr, 38, 132, 390, 210, 22);
+        cairo_set_source_rgba(cr, 0.07, 0.08, 0.14, 0.95);
+        cairo_fill_preserve(cr);
+        cairo_set_line_width(cr, 1.2);
+        cairo_set_source_rgba(cr, 0.26, 0.22, 0.42, 1.0);
+        cairo_stroke(cr);
+
+        draw_pango_text(cr,
+                        g_sim.muse_app.last_transcript[0]
+                            ? g_sim.muse_app.last_transcript
+                            : "Muse 官方语音助手已就绪，按住 BOOT 键开始对话。",
+                        "Sans 16",
+                        56,
+                        152,
+                        354,
+                        PANGO_ALIGN_LEFT,
+                        0.94,
+                        0.96,
+                        1.0);
+
+        char cred_footer[128];
+        snprintf(cred_footer,
+                 sizeof(cred_footer),
+                 "device_id: %s | token: %.16s…",
+                 g_sim.muse_app.credentials.device_id,
+                 g_sim.muse_app.credentials.access_token);
+        draw_pango_text(cr, cred_footer, "Monospace 10", 52, 316, 362, PANGO_ALIGN_CENTER, 0.56, 0.52, 0.76);
+
+        draw_rounded_rect(cr, 85, 360, 140, 48, 24);
+        cairo_set_source_rgba(cr, 0.22, 0.14, 0.28, 1.0);
+        cairo_fill_preserve(cr);
+        cairo_set_line_width(cr, 1.6);
+        cairo_set_source_rgba(cr, 0.58, 0.38, 0.78, 1.0);
+        cairo_stroke(cr);
+        draw_pango_text(cr, "解绑重授权", "Sans Bold 13", 90, 374, 130, PANGO_ALIGN_CENTER, 0.92, 0.88, 0.98);
+    }
+
+    draw_rounded_rect(cr, 241, 360, 140, 48, 24);
+    cairo_set_source_rgba(cr, 0.10, 0.14, 0.20, 1.0);
+    cairo_fill_preserve(cr);
+    cairo_set_line_width(cr, 1.6);
+    cairo_set_source_rgba(cr, 0.25, 0.34, 0.46, 1.0);
+    cairo_stroke(cr);
+    draw_pango_text(cr, "切换系统", "Sans Bold 13", 246, 374, 130, PANGO_ALIGN_CENTER, 0.82, 0.88, 0.96);
 }
 
 static void render_nevoflux_screen(cairo_t *cr)
@@ -588,10 +840,14 @@ bool sim_render_png(const char *png_path)
 int sim_get_state_json(char *out_buf, size_t out_cap)
 {
     const char *part_name = (g_sim.active_partition == SIM_PARTITION_LAUNCHER) ? "factory (Launcher)"
-                          : (g_sim.active_partition == SIM_PARTITION_MUSE)     ? "ota_0 (Muse)"
+                          : (g_sim.active_partition == SIM_PARTITION_MUSE)     ? "ota_0 (Muse Gadget SDK)"
                                                                                : "ota_1 (NevoFlux)";
     const char *app_st = "IDLE";
-    if (g_sim.nevo_app.state == NF_APP_STATE_LISTENING) app_st = "LISTENING (PTT)";
+    if (g_sim.active_partition == SIM_PARTITION_MUSE) {
+        app_st = (g_sim.muse_app.auth_state == MUSE_AUTH_AUTHORIZED)
+               ? "MUSE_AUTHORIZED (NVS: muse_cfg)"
+               : "MUSE_RFC8628_DEVICE_FLOW (user_code: ABC-123)";
+    } else if (g_sim.nevo_app.state == NF_APP_STATE_LISTENING) app_st = "LISTENING (PTT)";
     else if (g_sim.nevo_app.state == NF_APP_STATE_WAITING_REPLY) app_st = "WAITING_REPLY";
     else if (g_sim.nevo_app.state == NF_APP_STATE_PLAYING) app_st = "PLAYING (TTS)";
     else if (g_sim.nevo_app.state == NF_APP_STATE_MEETING) app_st = "MEETING (/meeting)";
@@ -601,6 +857,7 @@ int sim_get_state_json(char *out_buf, size_t out_cap)
                     "{"
                     "\"partition\":\"%s\","
                     "\"app_state\":\"%s\","
+                    "\"muse_user_code\":\"%s\","
                     "\"sample_rate\":%u,"
                     "\"utterance_id\":\"%llu\","
                     "\"chunk_seq\":%u,"
@@ -610,6 +867,7 @@ int sim_get_state_json(char *out_buf, size_t out_cap)
                     "}",
                     part_name,
                     app_st,
+                    g_sim.muse_app.user_code,
                     (unsigned)bsp_audio_get_sample_rate(),
                     (unsigned long long)g_sim.nevo_app.current_utterance_id,
                     (unsigned)g_sim.nevo_app.current_chunk_seq,
@@ -630,7 +888,12 @@ int main(int argc, char **argv)
         snprintf(path, sizeof(path), "%s/sim_01_launcher.png", out_dir);
         sim_render_png(path);
 
-        /* 2. NevoFlux Listening (PTT) + Partial speech */
+        /* 2. Muse (ota_0) OAuth 2.0 Device Flow (RFC 8628 QR + ABC-123 short code) */
+        sim_init(2);
+        snprintf(path, sizeof(path), "%s/sim_05_muse_oauth_device_flow.png", out_dir);
+        sim_render_png(path);
+
+        /* 3. NevoFlux Listening (PTT) + Partial speech */
         sim_init(1);
         sim_set_boot_button(true);
         sim_step_ms(400);
@@ -638,14 +901,14 @@ int main(int argc, char **argv)
         snprintf(path, sizeof(path), "%s/sim_02_listening_ptt.png", out_dir);
         sim_render_png(path);
 
-        /* 3. NevoFlux Playing 24kHz Kokoro TTS */
+        /* 4. NevoFlux Playing 24kHz Kokoro TTS */
         sim_set_boot_button(false);
         sim_inject_speech_final("帮我查一下上周关于语音吊坠双分区架构的纪要。", true);
         sim_inject_tts_asset("已为您查到 GBrain 纪要：语音吊坠采用 8MB 三明治分区（Launcher + Muse + NevoFlux），语音全程在本地 Daemon 处理。", 24000U);
         snprintf(path, sizeof(path), "%s/sim_03_playing_24khz.png", out_dir);
         sim_render_png(path);
 
-        /* 4. NevoFlux Hands-free Meeting Mode */
+        /* 5. NevoFlux Hands-free Meeting Mode */
         sim_init(1);
         sim_trigger_double_click_boot();
         sim_step_ms(200);
@@ -653,7 +916,7 @@ int main(int argc, char **argv)
         snprintf(path, sizeof(path), "%s/sim_04_meeting_mode.png", out_dir);
         sim_render_png(path);
 
-        printf("[OK] Exported 4 circular 466x466 AMOLED snapshots to %s\n", out_dir);
+        printf("[OK] Exported 5 circular 466x466 AMOLED snapshots to %s\n", out_dir);
         return 0;
     }
 

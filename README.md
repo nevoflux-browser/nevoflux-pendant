@@ -23,10 +23,11 @@ nevoflux-pendant/
 ├── Makefile                       # Host-side gcc & python3 test runner and storage partition packer
 ├── components/
 │   ├── nf_proto/                  # NFA1 (24B BE) & NFM1 (22+idLen BE) codecs, WAV parser, SequenceTracker, AES-256-GCM
-│   ├── prov_nvs/                  # Shared NVS (pendant / nf_cfg) + USB Serial JSON-RPC with 15s BOOT confirm
+│   ├── prov_nvs/                  # Shared NVS (pendant / muse_cfg / nf_cfg) + USB Serial JSON-RPC with 15s BOOT confirm
 │   └── bsp_143c/                  # Waveshare 1.43C pure-C BSP (SH8601 QSPI, ES8311/ES7210 shared I2S0, BOOT gestures)
 ├── apps/
 │   ├── launcher/                  # factory partition: Boot selector UI + BLE GATT / USB Serial provisioning
+│   ├── muse/                      # ota_0 partition: Official facebookincubator/muse-gadget-sdk + OAuth 2.0 Device Flow (RFC 8628)
 │   └── nevoflux/                  # ota_1 partition: NevoFlux private voice client (BLE disabled, dual-core PSRAM architecture)
 └── tools/
     ├── provision/                 # Python 3 CLI: Device Grant + Argon2id(m=65536,t=3,p=4) KDF + USB Serial injection
@@ -38,19 +39,31 @@ nevoflux-pendant/
 
 | Name | Type / SubType | Offset | Size | Description |
 |---|---|---|---|---|
-| `nvs` | `data` / `nvs` | `0x009000` | 24 KB | Shared `pendant` WiFi config & `nf_cfg` pairing credentials |
+| `nvs` | `data` / `nvs` | `0x009000` | 24 KB | Shared `pendant` WiFi config, `muse_cfg` OAuth token, and `nf_cfg` pairing credentials |
 | `otadata` | `data` / `ota` | `0x00F000` | 8 KB | Bootloader active OTA selector (erasing falls back to `factory`) |
 | `phy_init` | `data` / `phy` | `0x011000` | 4 KB | RF calibration data |
 | `factory` | `app` / `factory` | `0x020000` | **1.0 MB** | **Launcher**: Dual-boot UI + NimBLE GATT & USB Serial provisioning |
-| `ota_0` | `app` / `ota_0` | `0x120000` | **3.0 MB** | **Muse Partition**: Community port fork (`wupsbr`) |
+| `ota_0` | `app` / `ota_0` | `0x120000` | **3.0 MB** | **Muse Partition**: Official [`facebookincubator/muse-gadget-sdk`](https://github.com/facebookincubator/muse-gadget-sdk) + RFC 8628 Device Flow |
 | `ota_1` | `app` / `ota_1` | `0x420000` | **2.5 MB** | **NevoFlux Partition**: Native C client (`CONFIG_BT_ENABLED=n`) |
 | `storage` | `data` / `spiffs` | `0x6A0000` | **1.375 MB** | Shared zero-copy `mmap` image (20px CJK font + ESP-SR VAD model) |
+
+## Dual-System Authentication Flows
+
+### Muse Partition (`ota_0`): On-Device OAuth 2.0 Device Authorization Grant (RFC 8628)
+Built on the official [Meta Muse Gadget ESP32 SDK](https://github.com/facebookincubator/muse-gadget-sdk) (`apps/muse`), leveraging the 1.43" (466×466) AMOLED display for zero-token factory flashing:
+1. **Zero Pre-baked Token**: Factory firmware requires no hardcoded user SDK token.
+2. **Device Code Request**: After joining Wi-Fi (from shared `pendant` NVS), the ESP32 requests `device_code` and `user_code` from the Muse authentication endpoint.
+3. **On-Screen QR & Short Code**: The 466×466 round screen renders a login QR code and short code prompt (e.g., *"Visit `muse.ai/link` and enter code `ABC-123`"*).
+4. **Browser Approval & Auto-NVS Persistence**: While the user approves in their phone/PC browser, the ESP32 polls in the background (honoring RFC 8628 `authorization_pending` and `slow_down` intervals). Once approved, the issued long-lived token is automatically saved into NVS (`muse_cfg`).
+
+### NevoFlux Partition (`ota_1`): End-to-End Encrypted Private Daemon Pairing
+Uses `tools/provision/provision.py` to mint a dedicated 7-day device `account_token` and derive 32-byte AES-256-GCM channel keys (`Argon2id m=65536, t=3, p=4`), requiring a physical `BOOT` button press within 15 seconds on the pendant before committing to NVS (`nf_cfg`).
 
 ## Quick Start
 
 ### 1. Run Host Unit & Integration Tests (`gcc` + `python3`)
 
-All wire codecs (`NFA1`, `NFM1`, WAV header parser, `SequenceTracker`), AES-256-GCM framing, NVS provisioning handshakes, I2S sample-rate switching, and dual-mode PTT/Meeting state machines run natively on Linux without hardware:
+All wire codecs (`NFA1`, `NFM1`, WAV header parser, `SequenceTracker`), AES-256-GCM framing, NVS provisioning handshakes, Muse RFC 8628 Device Flow state machines, I2S sample-rate switching, and dual-mode PTT/Meeting state machines run natively on Linux without hardware:
 
 ```bash
 make test
@@ -58,7 +71,7 @@ make test
 
 ### 2. Launch the 1.43" (466×466) Circular AMOLED UI Simulator
 
-You can preview and interact with the Launcher (`factory`), Push-to-Talk (`PTT`), TTS Playback (`24kHz` / `48kHz`), and Meeting Mode UIs on Linux via either the Web Simulator or the native SDL2 desktop app:
+You can preview and interact with the Launcher (`factory`), Muse RFC 8628 QR/Short-Code Pairing (`ota_0`), Push-to-Talk (`PTT`), TTS Playback (`24kHz` / `48kHz`), and Meeting Mode UIs on Linux via either the Web Simulator or the native SDL2 desktop app:
 
 ```bash
 # Start interactive Web Simulator on http://localhost:8765
@@ -92,12 +105,16 @@ make storage
 # 2. Build Launcher (factory @ 0x20000)
 idf.py -C apps/launcher set-target esp32s3 && idf.py -C apps/launcher build
 
-# 3. Build NevoFlux Firmware (ota_1 @ 0x420000)
+# 3. Build Muse Firmware (ota_0 @ 0x120000)
+idf.py -C apps/muse set-target esp32s3 && idf.py -C apps/muse build
+
+# 4. Build NevoFlux Firmware (ota_1 @ 0x420000)
 idf.py -C apps/nevoflux set-target esp32s3 && idf.py -C apps/nevoflux build
 
-# 4. Flash partitions via esptool.py
+# 5. Flash partitions via esptool.py
 esptool.py --chip esp32s3 write_flash \
   0x20000  apps/launcher/build/nevoflux_launcher.bin \
+  0x120000 apps/muse/build/muse_gadget_pendant.bin \
   0x420000 apps/nevoflux/build/nevoflux_pendant.bin \
   0x6A0000 build/storage.bin
 ```

@@ -7,6 +7,7 @@ CFLAGS := -std=c11 -Wall -Wextra -O2 -fPIC -DUSE_SDL2 \
 	-I../../components/prov_nvs/include \
 	-I../../components/bsp_143c/include \
 	-I../../apps/nevoflux/main \
+	-I../../apps/muse/main \
 	$(PKG_CFLAGS)
 
 FW_SRCS := \
@@ -23,7 +24,8 @@ FW_SRCS := \
 	../../apps/nevoflux/main/relay_ws.c \
 	../../apps/nevoflux/main/audio_in.c \
 	../../apps/nevoflux/main/audio_out.c \
-	../../apps/nevoflux/main/app_state.c
+	../../apps/nevoflux/main/app_state.c \
+	../../apps/muse/main/muse_oauth_device.c
 
 LIB_TARGET := libnevoflux_sim.so
 BIN_TARGET := nevoflux_sim

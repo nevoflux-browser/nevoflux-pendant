@@ -13,6 +13,8 @@ test-c:
 	$(MAKE) -C components/bsp_143c/test clean
 	$(MAKE) -C apps/nevoflux/test test
 	$(MAKE) -C apps/nevoflux/test clean
+	$(MAKE) -C apps/muse/test test
+	$(MAKE) -C apps/muse/test clean
 
 test-py:
 	python3 -m unittest discover -s tools/provision -p "test_*.py" -v
@@ -31,6 +33,7 @@ clean:
 	$(MAKE) -C components/prov_nvs/test clean
 	$(MAKE) -C components/bsp_143c/test clean
 	$(MAKE) -C apps/nevoflux/test clean
+	$(MAKE) -C apps/muse/test clean
 	$(MAKE) -C tools/sim clean
 	rm -rf build/
 

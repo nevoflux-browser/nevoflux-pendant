@@ -11,6 +11,7 @@ extern "C" {
 
 #define PROV_NVS_NS_PENDANT         "pendant"
 #define PROV_NVS_NS_NF_CFG          "nf_cfg"
+#define PROV_NVS_NS_MUSE_CFG        "muse_cfg"
 
 #define PROV_CONFIRM_TIMEOUT_MS     15000ULL
 
@@ -39,12 +40,22 @@ typedef struct {
     bool    is_paired;
 } nf_credentials_t;
 
+typedef struct {
+    char access_token[256];
+    char refresh_token[256];
+    char device_id[64];
+    bool is_authorized;
+} muse_credentials_t;
+
 bool prov_nvs_init(void);
 bool prov_nvs_load_pendant(pendant_config_t *out_cfg);
 bool prov_nvs_save_pendant(const pendant_config_t *cfg);
 bool prov_nvs_load_nf_cfg(nf_credentials_t *out_cred);
 bool prov_nvs_save_nf_cfg(const nf_credentials_t *cred);
 bool prov_nvs_clear_nf_cfg(void);
+bool prov_nvs_load_muse_cfg(muse_credentials_t *out_cred);
+bool prov_nvs_save_muse_cfg(const muse_credentials_t *cred);
+bool prov_nvs_clear_muse_cfg(void);
 
 /* =========================================================================
  * USB Serial / BLE JSON-RPC Provisioning State Machine with 15s BOOT Confirm

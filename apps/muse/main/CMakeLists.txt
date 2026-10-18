@@ -1,0 +1,17 @@
+idf_component_register(
+    SRCS
+        "muse_oauth_device.c"
+        "muse_main.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        bsp_143c
+        prov_nvs
+        esp_http_client
+        esp_wifi
+        esp_event
+        esp_netif
+        app_update
+        esp_partition
+        mbedtls
+)

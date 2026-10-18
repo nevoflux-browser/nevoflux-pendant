@@ -172,15 +172,69 @@ bool prov_nvs_clear_nf_cfg(void)
     return ok;
 }
 
+bool prov_nvs_load_muse_cfg(muse_credentials_t *out_cred)
+{
+    if (!out_cred) {
+        return false;
+    }
+    memset(out_cred, 0, sizeof(*out_cred));
+    nvs_handle_t h;
+    if (nvs_open(PROV_NVS_NS_MUSE_CFG, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    size_t acc_len = sizeof(out_cred->access_token);
+    size_t ref_len = sizeof(out_cred->refresh_token);
+    size_t dev_len = sizeof(out_cred->device_id);
+
+    bool ok = (nvs_get_str(h, "access_token", out_cred->access_token, &acc_len) == ESP_OK) &&
+              (out_cred->access_token[0] != '\0');
+    (void)nvs_get_str(h, "refresh_token", out_cred->refresh_token, &ref_len);
+    (void)nvs_get_str(h, "device_id", out_cred->device_id, &dev_len);
+    nvs_close(h);
+
+    out_cred->is_authorized = ok;
+    return out_cred->is_authorized;
+}
+
+bool prov_nvs_save_muse_cfg(const muse_credentials_t *cred)
+{
+    if (!cred || cred->access_token[0] == '\0') {
+        return false;
+    }
+    nvs_handle_t h;
+    if (nvs_open(PROV_NVS_NS_MUSE_CFG, NVS_READWRITE, &h) != ESP_OK) {
+        return false;
+    }
+    bool ok = (nvs_set_str(h, "access_token", cred->access_token) == ESP_OK) &&
+              (nvs_set_str(h, "refresh_token", cred->refresh_token) == ESP_OK) &&
+              (nvs_set_str(h, "device_id", cred->device_id) == ESP_OK) &&
+              (nvs_commit(h) == ESP_OK);
+    nvs_close(h);
+    return ok;
+}
+
+bool prov_nvs_clear_muse_cfg(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(PROV_NVS_NS_MUSE_CFG, NVS_READWRITE, &h) != ESP_OK) {
+        return false;
+    }
+    bool ok = (nvs_erase_all(h) == ESP_OK) && (nvs_commit(h) == ESP_OK);
+    nvs_close(h);
+    return ok;
+}
+
 #else /* Host mock storage for unit testing */
 
-static pendant_config_t s_mock_pendant;
-static nf_credentials_t s_mock_nf_cred;
+static pendant_config_t   s_mock_pendant;
+static nf_credentials_t   s_mock_nf_cred;
+static muse_credentials_t s_mock_muse_cred;
 
 bool prov_nvs_init(void)
 {
     memset(&s_mock_pendant, 0, sizeof(s_mock_pendant));
     memset(&s_mock_nf_cred, 0, sizeof(s_mock_nf_cred));
+    memset(&s_mock_muse_cred, 0, sizeof(s_mock_muse_cred));
     return true;
 }
 
@@ -225,6 +279,31 @@ bool prov_nvs_save_nf_cfg(const nf_credentials_t *cred)
 bool prov_nvs_clear_nf_cfg(void)
 {
     memset(&s_mock_nf_cred, 0, sizeof(s_mock_nf_cred));
+    return true;
+}
+
+bool prov_nvs_load_muse_cfg(muse_credentials_t *out_cred)
+{
+    if (!out_cred) {
+        return false;
+    }
+    *out_cred = s_mock_muse_cred;
+    return s_mock_muse_cred.is_authorized;
+}
+
+bool prov_nvs_save_muse_cfg(const muse_credentials_t *cred)
+{
+    if (!cred || cred->access_token[0] == '\0') {
+        return false;
+    }
+    s_mock_muse_cred = *cred;
+    s_mock_muse_cred.is_authorized = true;
+    return true;
+}
+
+bool prov_nvs_clear_muse_cfg(void)
+{
+    memset(&s_mock_muse_cred, 0, sizeof(s_mock_muse_cred));
     return true;
 }
 
