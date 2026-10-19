@@ -30,9 +30,10 @@ nevoflux-pendant/
 │   ├── muse/                      # ota_0 partition: Official facebookincubator/muse-gadget-sdk + OAuth 2.0 Device Flow (RFC 8628)
 │   └── nevoflux/                  # ota_1 partition: NevoFlux private voice client (BLE disabled, dual-core PSRAM architecture)
 └── tools/
-    ├── provision/                 # Python 3 CLI: Device Grant + Argon2id(m=65536,t=3,p=4) KDF + USB Serial injection
+    ├── provision/                 # Python 3 CLI: Device Grant + Argon2id(m=65536,t=3,p=4) KDF + USB Serial / TCP injection
     ├── pack_storage/              # Pack shared storage partition image (20px CJK bitmap font + ESP-SR VAD model)
-    └── sim/                       # 1.43" (466×466) round AMOLED UI simulator (SDL2 desktop + Web UI)
+    ├── sim/                       # 1.43" (466×466) round AMOLED UI simulator (SDL2 desktop + Web UI)
+    └── emu/                       # ESP32-S3 SoC & Flash emulator runner (espressif/esp-emulator)
 ```
 
 ## 8MB Flash Partition Table (`partitions.csv`)
@@ -81,9 +82,24 @@ make sim-web
 make -C tools/sim run-sdl
 ```
 
-### 3. Provision WiFi & NevoFlux Pairing Credentials
+### 3. Run the ESP32-S3 SoC & Flash Emulator (`espressif/esp-emulator`)
 
-Run `/pair-device` on your NevoFlux desktop daemon to get a pairing code, then connect the pendant via USB:
+Using Espressif's [`esp-emulator` (`esp-emu`)](https://github.com/espressif/esp-emulator), you can boot a full 8MB merged ESP32-S3 flash image (`partitions.csv` + `storage.bin` + `otadata` + `factory`/`ota_0`/`ota_1`) directly from the real ESP32-S3 Mask ROM (`ESP-ROM:esp32s3-20210327`) with 8MB Octal PSRAM and simulated 2.4GHz Wi-Fi:
+
+```bash
+# Automated Dual-OTA partition switching test (factory -> ota_0 -> ota_1 -> factory)
+make emu-ota
+
+# Automated UART TCP provisioning (provision.py -> NVS @ 0x009000 persistence check)
+make emu-provision
+
+# Interactive ESP32-S3 session (type '0' for Muse, '1' for NevoFlux, 'l' for Launcher)
+make emu
+```
+
+### 4. Provision WiFi & NevoFlux Pairing Credentials
+
+Run `/pair-device` on your NevoFlux desktop daemon to get a pairing code, then connect the pendant via USB (or `tcp://127.0.0.1:15555` when running `esp-emu`):
 
 ```bash
 python3 tools/provision/provision.py \
@@ -96,7 +112,7 @@ python3 tools/provision/provision.py \
 - The tool performs an independent **Device Authorization Grant** (minting a dedicated 7-day `account_token` for the pendant so it can be revoked independently if lost) and derives the 32-byte AES-256-GCM keys on the host using `Argon2id (m=65536, t=3, p=4)`.
 - When prompted on the pendant screen, **click the `BOOT` button once within 15 seconds** to confirm physical presence and commit the credentials to NVS.
 
-### 4. Build & Flash ESP32-S3 Firmware (ESP-IDF)
+### 5. Build & Flash ESP32-S3 Firmware (ESP-IDF)
 
 ```bash
 # 1. Pack shared storage image (CJK font + VAD model)

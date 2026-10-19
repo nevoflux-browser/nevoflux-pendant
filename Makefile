@@ -1,4 +1,4 @@
-.PHONY: all test test-c test-py storage sim sim-web clean
+.PHONY: all test test-c test-py storage sim sim-web emu emu-ota emu-provision clean
 
 all: test
 
@@ -28,6 +28,15 @@ sim:
 sim-web:
 	$(MAKE) -C tools/sim web
 
+emu:
+	./tools/emu/run_esp_emu.sh
+
+emu-ota:
+	./tools/emu/run_esp_emu.sh --demo-ota
+
+emu-provision:
+	./tools/emu/run_esp_emu.sh --demo-provision
+
 clean:
 	$(MAKE) -C components/nf_proto/test clean
 	$(MAKE) -C components/prov_nvs/test clean
@@ -36,4 +45,5 @@ clean:
 	$(MAKE) -C apps/muse/test clean
 	$(MAKE) -C tools/sim clean
 	rm -rf build/
+
 

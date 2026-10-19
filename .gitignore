@@ -93,5 +93,7 @@ eval/reports/
 
 # Simulator binary & Python bytecode
 tools/sim/nevoflux_sim
+tools/emu/bin/
 __pycache__/
 *.pyc
+

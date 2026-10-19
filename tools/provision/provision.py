@@ -328,6 +328,34 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 0
 
+    if args.port.startswith(("tcp://", "socket://")):
+        addr_part = args.port.split("://", 1)[1]
+        host, port_str = addr_part.rsplit(":", 1)
+        print(f"[3/3] 正在连接模拟器 UART TCP 端口 {host}:{port_str}...")
+        with socket.create_connection((host, int(port_str)), timeout=5.0) as sock:
+            sock_file = sock.makefile("rwb", buffering=0)
+
+            def tcp_rpc(line: str) -> str:
+                sock_file.write((line + "\n").encode("utf-8"))
+                while True:
+                    raw_bytes = sock_file.readline()
+                    if not raw_bytes:
+                        raise RuntimeError("UART TCP connection closed before JSON response")
+                    raw = raw_bytes.decode("utf-8", errors="ignore").strip()
+                    if raw.startswith("{") and raw.endswith("}"):
+                        return raw
+
+            execute_provisioning_handshake(
+                send_line=tcp_rpc,
+                material=material,
+                account_token=account_token,
+                wifi_ssid=args.ssid,
+                wifi_pass=args.password,
+                relay_url=args.relay_url,
+            )
+        print("[OK] 配对凭证与 WiFi 配置已成功写入模拟器 NVS！")
+        return 0
+
     import serial  # type: ignore
 
     print(f"[3/3] 正在连接串口 {args.port}，请在吊坠提示后 15 秒内按一下 BOOT 键确认...")
