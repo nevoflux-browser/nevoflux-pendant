@@ -149,6 +149,44 @@ The Launcher then shows `SSID · IP · RSSI` under the title once the router ass
 
 UI fonts (`components/bsp_143c/src/fonts/`) are subset to the strings used in the firmware; regenerate with `python3 tools/fonts/gen_ui_font.py` after adding new Chinese UI text.
 
+### 6. Flashing on Windows 10
+
+1. **Copy the files** to the Windows PC (e.g. `C:\fw\`): `build/firmware/nevoflux-pendant-8MB.bin` and `tools/provision/provision.py`. Optionally verify the image against `build/firmware/SHA256SUMS`:
+
+   ```bat
+   certutil -hashfile C:\fw\nevoflux-pendant-8MB.bin SHA256
+   ```
+
+2. **Install Python 3** (tick "Add python.exe to PATH"), then:
+
+   ```bat
+   pip install esptool pyserial
+   ```
+
+3. **Find the COM port.** Connect the board over USB-C (the ESP32-S3 native USB uses the built-in Win10 driver). In Device Manager → *Ports (COM & LPT)*, note the "USB Serial Device (COMx)". If no port appears or flashing fails to connect, enter download mode: hold `BOOT`, tap `RESET`, release `BOOT` (the COM number may change).
+
+4. **Flash** (examples use `COM5`):
+
+   ```bat
+   python -m esptool --chip esp32s3 -p COM5 -b 921600 write_flash 0x0 C:\fw\nevoflux-pendant-8MB.bin
+   ```
+
+   Success ends with `Hash of data verified.` On errors retry with `-b 460800`. If you used download mode, press `RESET` afterwards. The merged image erases NVS, so WiFi must be provisioned again after every full flash.
+
+5. **Provision WiFi** once the Launcher is running (not in download mode), and click `BOOT` within 15s when the screen prompts. Only 2.4 GHz networks are supported.
+
+   ```bat
+   python C:\fw\provision.py --wifi-only --port COM5 --ssid "MyRouter" --password "secret"
+   ```
+
+6. **Serial log** for troubleshooting (close other programs using the port, press `RESET`, exit with `Ctrl+]`):
+
+   ```bat
+   python -m serial.tools.miniterm COM5 115200
+   ```
+
+**GUI alternative:** Espressif *Flash Download Tool* — ChipType `ESP32-S3`, WorkMode `Develop`, LoadMode `USB`; add only `nevoflux-pendant-8MB.bin` @ `0x0` (ticked); SPI SPEED `80MHz`, SPI MODE `DIO`, FLASH SIZE `64Mbit`; select the COM port, BAUD `921600`, START. Then provision WiFi with step 5.
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](file:///ai/project/nevoflux-pendant/LICENSE).
