@@ -1,9 +1,12 @@
 idf_component_register(
     SRCS
         "src/prov_nvs.c"
+        "src/prov_usb.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
         nvs_flash
         json
+    PRIV_REQUIRES
+        esp_driver_usb_serial_jtag
 )

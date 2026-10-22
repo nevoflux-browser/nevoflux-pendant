@@ -1,5 +1,5 @@
 dependencies:
   idf: ">=5.3.0"
-  lvgl/lvgl: "^8.3.0"
-  # Official Meta Muse Gadget SDK component (https://github.com/facebookincubator/muse-gadget-sdk)
-  # Linked from esp32/components/muse when building with muse-gadget-sdk
+  # LVGL 9 comes in through components/bsp_143c.
+  # The Meta Muse Gadget SDK (https://github.com/facebookincubator/muse-gadget-sdk) is not vendored yet;
+  # this app currently implements only the RFC 8628 Device Flow on top of esp_http_client.

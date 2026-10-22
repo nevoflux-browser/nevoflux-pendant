@@ -9,11 +9,13 @@ ESP32-S3 firmware monorepo for the **NevoFlux Voice Pendant** — dual-boot **Mu
 | Component | Specification |
 |---|---|
 | SoC | ESP32-S3-PICO-1-N8R8 (8MB QIO Flash / 8MB Octal PSRAM, 512KB Internal SRAM) |
-| Display | 1.43" Round AMOLED (466×466), SH8601 controller over QSPI |
-| Touch | FT3168 / CST816 capacitive touch over I2C |
+| Display | 1.43" Round AMOLED (466×466), CO5300 controller over QSPI (SPI2 @ 40 MHz; driven via `esp_lcd_sh8601`) |
+| Touch | CST820 capacitive touch over I2C (`0x15`, shared bus GPIO47/48) |
 | Audio | ES8311 (Mono DAC + PA) + ES7210 (Dual-Mic ADC) sharing `I2S_NUM_0` clocks |
 | Power | Direct battery voltage divider via `ADC1_CH3` (no PMU) |
-| Buttons | `BOOT` (`GPIO0`: Hold = Push-to-Talk, Double-Click = Meeting Mode, Hold 2s on boot = Launcher Escape), `PWR` (`GPIO1`: Cancel / Return) |
+| Buttons | `BOOT` (`GPIO0`: Hold = Push-to-Talk, Double-Click = Meeting Mode, Hold 2s on boot = Launcher Escape), `PWR` (wired to the power-latch IC, not readable by firmware) |
+
+Pin assignments in `components/bsp_143c/include/bsp_143c_pins.h` follow the official [Waveshare demo `bsp_config.h`](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.43C) and schematic.
 
 ## Repository Layout
 
@@ -24,7 +26,8 @@ nevoflux-pendant/
 ├── components/
 │   ├── nf_proto/                  # NFA1 (24B BE) & NFM1 (22+idLen BE) codecs, WAV parser, SequenceTracker, AES-256-GCM
 │   ├── prov_nvs/                  # Shared NVS (pendant / muse_cfg / nf_cfg) + USB Serial JSON-RPC with 15s BOOT confirm
-│   └── bsp_143c/                  # Waveshare 1.43C pure-C BSP (SH8601 QSPI, ES8311/ES7210 shared I2S0, BOOT gestures)
+│   └── bsp_143c/                  # Waveshare 1.43C BSP (CO5300 QSPI + LVGL 9 UI, CST820 touch, ES8311/ES7210 I2S0, BOOT gestures)
+│   └── pendant_wifi/              # Shared WiFi STA (credentials from `pendant` NVS, auto-reconnect)
 ├── apps/
 │   ├── launcher/                  # factory partition: Boot selector UI + BLE GATT / USB Serial provisioning
 │   ├── muse/                      # ota_0 partition: Official facebookincubator/muse-gadget-sdk + OAuth 2.0 Device Flow (RFC 8628)
@@ -114,26 +117,37 @@ python3 tools/provision/provision.py \
 
 ### 5. Build & Flash ESP32-S3 Firmware (ESP-IDF)
 
+Builds all three apps with ESP-IDF v5.3.2 in Docker (no local IDF needed) and writes flashable images to `build/firmware/`:
+
 ```bash
-# 1. Pack shared storage image (CJK font + VAD model)
-make storage
-
-# 2. Build Launcher (factory @ 0x20000)
-idf.py -C apps/launcher set-target esp32s3 && idf.py -C apps/launcher build
-
-# 3. Build Muse Firmware (ota_0 @ 0x120000)
-idf.py -C apps/muse set-target esp32s3 && idf.py -C apps/muse build
-
-# 4. Build NevoFlux Firmware (ota_1 @ 0x420000)
-idf.py -C apps/nevoflux set-target esp32s3 && idf.py -C apps/nevoflux build
-
-# 5. Flash partitions via esptool.py
-esptool.py --chip esp32s3 write_flash \
-  0x20000  apps/launcher/build/nevoflux_launcher.bin \
-  0x120000 apps/muse/build/muse_gadget_pendant.bin \
-  0x420000 apps/nevoflux/build/nevoflux_pendant.bin \
-  0x6A0000 build/storage.bin
+make firmware
+# optional: bake a fallback WiFi used only while NVS has none
+WIFI_SSID="MyRouter" WIFI_PASS="secret" make firmware
 ```
+
+Flash the merged 8MB image (first flash; this also erases NVS):
+
+```bash
+esptool.py --chip esp32s3 -p /dev/ttyACM0 -b 921600 write_flash 0x0 build/firmware/nevoflux-pendant-8MB.bin
+```
+
+Or flash the individual images and keep NVS (WiFi / pairing) intact:
+
+```bash
+cd build/firmware && esptool.py --chip esp32s3 -p /dev/ttyACM0 -b 921600 write_flash @flash_args
+```
+
+If the board does not enumerate, hold `BOOT`, tap `RESET`, release `BOOT` to enter download mode.
+
+Write WiFi only (no NevoFlux pairing needed); click `BOOT` on the pendant within 15s when prompted:
+
+```bash
+python3 tools/provision/provision.py --wifi-only --port /dev/ttyACM0 --ssid "MyRouter" --password "secret"
+```
+
+The Launcher then shows `SSID · IP · RSSI` under the title once the router assigns an address.
+
+UI fonts (`components/bsp_143c/src/fonts/`) are subset to the strings used in the firmware; regenerate with `python3 tools/fonts/gen_ui_font.py` after adding new Chinese UI text.
 
 ## License
 

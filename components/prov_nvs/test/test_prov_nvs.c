@@ -104,6 +104,24 @@ int main(void)
     assert(prov_nvs_clear_muse_cfg());
     assert(!prov_nvs_load_muse_cfg(&loaded_muse));
 
+    /* 8. prov.wifi (WiFi-only) needs BOOT confirm, updates WiFi (incl. UTF-8 SSID), keeps nf_cfg */
+    const char *wifi_cmd = "{\"cmd\":\"prov.wifi\",\"wifi_ssid\":\"家里的WiFi\",\"wifi_pass\":\"p@ss \\\"q\\\"\"}";
+    assert(prov_rpc_handle_line(&rpc, wifi_cmd, 30000ULL, resp, sizeof(resp)) > 0);
+    assert(strstr(resp, "boot_confirm_required") != NULL);
+    assert(prov_rpc_handle_line(&rpc, "{\"cmd\":\"prov.offer\",\"device\":\"PC\"}", 30000ULL, resp, sizeof(resp)) > 0);
+    assert(prov_rpc_confirm_boot(&rpc, 31000ULL));
+    assert(prov_rpc_handle_line(&rpc, "{\"cmd\":\"prov.wifi\"}", 31500ULL, resp, sizeof(resp)) > 0);
+    assert(strstr(resp, "missing_wifi_ssid") != NULL);
+    assert(prov_rpc_handle_line(&rpc, wifi_cmd, 32000ULL, resp, sizeof(resp)) > 0);
+    assert(strcmp(resp, "{\"status\":\"ok\"}") == 0);
+    assert(cb_ctx.applied_count == 2);
+    assert(prov_nvs_load_pendant(&loaded_pendant));
+    assert(strcmp(loaded_pendant.wifi_ssid, "家里的WiFi") == 0);
+    assert(strcmp(loaded_pendant.wifi_pass, "p@ss \"q\"") == 0);
+    assert(prov_nvs_load_nf_cfg(&loaded_cred) && loaded_cred.is_paired);
+    assert(prov_rpc_handle_line(&rpc, "{\"cmd\":\"prov.status\"}", 32500ULL, resp, sizeof(resp)) > 0);
+    assert(strcmp(resp, "{\"status\":\"idle\"}") == 0);
+
     printf("[PASS] All prov_nvs unit tests passed!\n");
     return 0;
 }

@@ -492,5 +492,33 @@ int prov_rpc_handle_line(prov_rpc_ctx_t *ctx,
         return snprintf(resp_buf, resp_cap, "{\"status\":\"ok\"}");
     }
 
+    if (strcmp(cmd, "prov.wifi") == 0) {
+        /* WiFi-only provisioning: same BOOT physical-presence gate, leaves nf_cfg untouched */
+        if (ctx->state != PROV_STATE_CONFIRMED) {
+            return snprintf(resp_buf, resp_cap,
+                            "{\"status\":\"error\",\"reason\":\"boot_confirm_required\"}");
+        }
+        pendant_config_t pendant;
+        (void)prov_nvs_load_pendant(&pendant);
+        if (!json_extract_str(json_line, "wifi_ssid", pendant.wifi_ssid, sizeof(pendant.wifi_ssid)) ||
+            pendant.wifi_ssid[0] == '\0') {
+            return snprintf(resp_buf, resp_cap, "{\"status\":\"error\",\"reason\":\"missing_wifi_ssid\"}");
+        }
+        if (!json_extract_str(json_line, "wifi_pass", pendant.wifi_pass, sizeof(pendant.wifi_pass))) {
+            pendant.wifi_pass[0] = '\0';
+        }
+        pendant.has_wifi = true;
+        if (!prov_nvs_save_pendant(&pendant)) {
+            return snprintf(resp_buf, resp_cap, "{\"status\":\"error\",\"reason\":\"nvs_pendant_save_failed\"}");
+        }
+        nf_credentials_t cred;
+        (void)prov_nvs_load_nf_cfg(&cred);
+        ctx->state = PROV_STATE_IDLE;
+        if (ctx->on_applied) {
+            ctx->on_applied(&pendant, &cred, ctx->user_ctx);
+        }
+        return snprintf(resp_buf, resp_cap, "{\"status\":\"ok\"}");
+    }
+
     return snprintf(resp_buf, resp_cap, "{\"status\":\"error\",\"reason\":\"unknown_cmd\"}");
 }

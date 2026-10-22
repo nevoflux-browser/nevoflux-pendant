@@ -3,6 +3,7 @@
 #include "bsp_143c.h"
 #include "prov_nvs.h"
 #include "ble_prov.h"
+#include "pendant_wifi.h"
 
 #if defined(ESP_PLATFORM)
 #include "esp_log.h"
@@ -38,10 +39,16 @@ static void on_prov_applied(const pendant_config_t *pendant,
                             const nf_credentials_t *cred,
                             void *user_ctx)
 {
-    (void)pendant;
     (void)cred;
     (void)user_ctx;
-    snprintf(s_ui_prompt, sizeof(s_ui_prompt), "配网与 NevoFlux 凭证已写入！点选系统启动");
+    snprintf(s_ui_prompt, sizeof(s_ui_prompt), "配置已写入！正在连接 WiFi…");
+#if defined(ESP_PLATFORM)
+    if (pendant && pendant->has_wifi) {
+        (void)pendant_wifi_start(pendant->wifi_ssid, pendant->wifi_pass);
+    }
+#else
+    (void)pendant;
+#endif
 }
 
 static bool boot_into_partition(pendant_system_t target_sys, pendant_config_t *pendant_cfg)
@@ -75,6 +82,11 @@ void app_main(void)
 
     pendant_config_t pendant_cfg;
     (void)prov_nvs_load_pendant(&pendant_cfg);
+#if defined(ESP_PLATFORM)
+    (void)prov_usb_line_init();
+    (void)pendant_wifi_start(pendant_cfg.has_wifi ? pendant_cfg.wifi_ssid : NULL, pendant_cfg.wifi_pass);
+    uint64_t last_net_ms = 0ULL;
+#endif
 
     nf_credentials_t nf_cred;
     (void)prov_nvs_load_nf_cfg(&nf_cred);
@@ -115,7 +127,11 @@ void app_main(void)
         }
 
         /* Non-blocking USB Serial JSON-RPC line check */
+#if defined(ESP_PLATFORM)
+        if (prov_usb_line_poll(line_buf, sizeof(line_buf))) {
+#else
         if (fgets(line_buf, sizeof(line_buf), stdin) != NULL) {
+#endif
             if (prov_rpc_handle_line(&rpc_ctx, line_buf, t_ms, resp_buf, sizeof(resp_buf)) > 0) {
                 printf("%s\n", resp_buf);
                 fflush(stdout);
@@ -124,6 +140,14 @@ void app_main(void)
             }
         }
 
+#if defined(ESP_PLATFORM)
+        if (t_ms - last_net_ms >= 500ULL) {
+            char net_line[96];
+            pendant_wifi_format_line(net_line, sizeof(net_line));
+            bsp_display_set_net_info(net_line);
+            last_net_ms = t_ms;
+        }
+#endif
         bsp_display_render_launcher(
             (int)pendant_cfg.last_system,
             pendant_cfg.has_wifi ? pendant_cfg.wifi_ssid : NULL,

@@ -1,10 +1,12 @@
 #include "muse_oauth_device.h"
 #include "bsp_143c.h"
 #include "prov_nvs.h"
+#include "pendant_wifi.h"
 #include <stdio.h>
 #include <string.h>
 
 #if defined(ESP_PLATFORM)
+#include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -16,14 +18,19 @@
 
 static const char *TAG = "muse_ota0";
 
-static void reboot_to_launcher(void)
+static char s_status[64] = "Muse";
+static char s_body[256] = "";
+
+static void ui_set_status(const char *status)
 {
-    const esp_partition_t *otadata = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, "otadata");
-    if (otadata) {
-        (void)esp_partition_erase_range(otadata, 0U, otadata->size);
-    }
-    esp_restart();
+    snprintf(s_status, sizeof(s_status), "%s", status);
+    bsp_display_render_status("Muse", s_status, s_body);
+}
+
+static void ui_set_transcript(const char *body)
+{
+    snprintf(s_body, sizeof(s_body), "%s", body);
+    bsp_display_render_status("Muse", s_status, s_body);
 }
 
 static bool http_post_form(const char *url, const char *form_body, char *out_json, size_t out_cap)
@@ -33,6 +40,7 @@ static bool http_post_form(const char *url, const char *form_body, char *out_jso
         .method = HTTP_METHOD_POST,
         .timeout_ms = 8000,
         .user_agent = "muse-gadget-sdk-esp32/1.0 (Waveshare-1.43C)",
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
@@ -61,26 +69,32 @@ static bool http_post_form(const char *url, const char *form_body, char *out_jso
 void app_main(void)
 {
     /* 1. Earliest boot-escape check: holding BOOT >= 2s returns to Launcher (factory) */
-    if (bsp_143c_check_boot_escape(2000U)) {
-        ESP_LOGW(TAG, "BOOT held >= 2s on startup; erasing otadata and returning to Launcher");
-        reboot_to_launcher();
-    }
+    bsp_check_boot_escape_2s();
 
     (void)prov_nvs_init();
-    (void)bsp_143c_init();
+    (void)bsp_display_init();
 
     pendant_config_t pendant_cfg = {0};
     (void)prov_nvs_load_pendant(&pendant_cfg);
+    const bool wifi_started =
+        pendant_wifi_start(pendant_cfg.has_wifi ? pendant_cfg.wifi_ssid : NULL, pendant_cfg.wifi_pass);
+    char net_line[96];
+    if (wifi_started) {
+        ui_set_status("正在连接 WiFi…");
+        (void)pendant_wifi_wait_connected(20000U);
+    }
+    pendant_wifi_format_line(net_line, sizeof(net_line));
+    bsp_display_set_net_info(net_line);
 
     muse_device_ctx_t muse_ctx;
     muse_device_init(&muse_ctx);
 
-    if (!pendant_cfg.has_wifi) {
-        bsp_143c_ui_set_status("Muse: 未配置 WiFi");
-        bsp_143c_ui_set_transcript("请切回 Launcher 通过 BLE 或 USB 配置 WiFi");
+    if (!wifi_started) {
+        ui_set_status("Muse: 未配置 WiFi");
+        ui_set_transcript("请切回 Launcher 通过 BLE 或 USB 配置 WiFi");
     } else if (muse_ctx.auth_state == MUSE_AUTH_UNPAIRED) {
         /* Start OAuth 2.0 Device Authorization Grant (RFC 8628) */
-        bsp_143c_ui_set_status("Muse OAuth2 设备授权");
+        ui_set_status("Muse OAuth2 设备授权");
         char req_body[192];
         char resp_json[1024];
         if (muse_oauth_build_device_code_req(&muse_ctx, req_body, sizeof(req_body)) > 0 &&
@@ -91,16 +105,29 @@ void app_main(void)
                 snprintf(msg, sizeof(msg),
                          "请访问 %s\n输入授权码: %s\n(或直接扫描屏幕二维码)",
                          muse_ctx.verification_uri, muse_ctx.user_code);
-                bsp_143c_ui_set_transcript(msg);
+                ui_set_transcript(msg);
             }
         }
     } else {
-        bsp_143c_ui_set_status("Muse AI 已连接");
-        bsp_143c_ui_set_transcript("按住 BOOT 键与 Muse 语音对话");
+        ui_set_status("Muse AI 已连接");
+        ui_set_transcript("按住 BOOT 键与 Muse 语音对话");
     }
+
+    bsp_key_fsm_t key_fsm;
+    bsp_key_init(&key_fsm);
+    uint64_t last_net_ms = 0ULL;
 
     for (;;) {
         uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+        if (bsp_display_poll_touch() == BSP_UI_TOUCH_SWITCH_SYS) {
+            (void)bsp_reboot_to_launcher();
+        }
+        (void)bsp_key_poll(&key_fsm, now_ms);
+        if (now_ms - last_net_ms >= 1000ULL) {
+            pendant_wifi_format_line(net_line, sizeof(net_line));
+            bsp_display_set_net_info(net_line);
+            last_net_ms = now_ms;
+        }
         if (muse_oauth_should_poll(&muse_ctx, now_ms)) {
             char poll_body[256];
             char poll_resp[1024];
@@ -108,12 +135,12 @@ void app_main(void)
                 http_post_form(MUSE_OAUTH_TOKEN_URL, poll_body, poll_resp, sizeof(poll_resp))) {
                 if (muse_oauth_on_token_poll_resp(&muse_ctx, poll_resp, now_ms)) {
                     ESP_LOGI(TAG, "RFC 8628 Device Flow authorized! Token saved to muse_cfg NVS");
-                    bsp_143c_ui_set_status("Muse AI 已授权并连接");
-                    bsp_143c_ui_set_transcript("授权成功！按住 BOOT 键开始与 Muse 对话");
+                    ui_set_status("Muse AI 已授权并连接");
+                    ui_set_transcript("授权成功！按住 BOOT 键开始与 Muse 对话");
                 }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(200));
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 #endif /* ESP_PLATFORM */

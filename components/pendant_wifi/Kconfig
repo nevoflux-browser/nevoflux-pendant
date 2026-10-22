@@ -1,0 +1,15 @@
+menu "Pendant WiFi"
+
+    config PENDANT_WIFI_DEFAULT_SSID
+        string "Fallback WiFi SSID"
+        default ""
+        help
+            Used only when the shared `pendant` NVS namespace has no SSID
+            (i.e. the device was never provisioned). Leave empty to require
+            provisioning via USB (`provision.py --wifi-only`).
+
+    config PENDANT_WIFI_DEFAULT_PASSWORD
+        string "Fallback WiFi password"
+        default ""
+
+endmenu

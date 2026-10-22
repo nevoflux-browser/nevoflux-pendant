@@ -1,0 +1,6 @@
+dependencies:
+  idf: ">=5.3.0"
+  # CO5300 is command-compatible with SH8601 (same driver as the official Waveshare 1.43C demo)
+  espressif/esp_lcd_sh8601: "^2.0.1"
+  espressif/esp_lvgl_port: "~2.4.4"
+  lvgl/lvgl: "~9.2.2"

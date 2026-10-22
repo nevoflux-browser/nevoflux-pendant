@@ -36,13 +36,14 @@ bool bsp_audio_init(uint32_t default_sample_rate_hz)
 
 #if defined(ESP_PLATFORM)
     gpio_config_t pa_io = {
-        .pin_bit_mask = (1ULL << BSP_PIN_PA_CTRL),
+        .pin_bit_mask = (1ULL << BSP_PIN_PA_CTRL) | (1ULL << BSP_PIN_CODEC_LDO_EN),
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_ENABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&pa_io);
+    gpio_set_level(BSP_PIN_CODEC_LDO_EN, 1); /* Power ES8311/ES7210 */
     bsp_audio_set_pa_enable(false);
 
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(BSP_I2S_NUM, I2S_ROLE_MASTER);

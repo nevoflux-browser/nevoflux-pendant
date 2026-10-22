@@ -7,7 +7,8 @@ idf_component_register(
     REQUIRES
         bsp_143c
         prov_nvs
+        pendant_wifi
         app_update
         esp_partition
-        bt
+        esp_timer
 )

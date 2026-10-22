@@ -253,9 +253,54 @@ def execute_provisioning_handshake(
       2. Poll `prov.status` until user clicks BOOT button (`status == "ready"`)
       3. `prov.write` -> writes WiFi + NevoFlux credentials into NVS
     """
+    _offer_and_wait_boot_confirm(send_line, device_name, poll_interval_sec, confirm_timeout_sec)
+
+    write_payload = {
+        "cmd": "prov.write",
+        "wifi_ssid": wifi_ssid,
+        "wifi_pass": wifi_pass,
+        "relay_url": relay_url,
+        "account_token": account_token,
+        "control_channel_id": material.control_channel_id,
+        "control_key_hex": material.control_key_hex,
+        "data_channel_id": material.data_channel_id,
+        "data_key_hex": material.data_key_hex,
+    }
+    write_resp = json.loads(send_line(json.dumps(write_payload, ensure_ascii=False)))
+    if write_resp.get("status") != "ok":
+        raise RuntimeError(f"prov.write failed: {write_resp}")
+
+
+def execute_wifi_provisioning(
+    send_line: Callable[[str], str],
+    wifi_ssid: str,
+    wifi_pass: str = "",
+    device_name: Optional[str] = None,
+    poll_interval_sec: float = 0.5,
+    confirm_timeout_sec: float = 15.0,
+) -> None:
+    """WiFi-only variant: `prov.offer` -> BOOT confirm -> `prov.wifi` (NevoFlux pairing untouched)."""
+    if not wifi_ssid:
+        raise ValueError("wifi_ssid is required")
+    _offer_and_wait_boot_confirm(send_line, device_name, poll_interval_sec, confirm_timeout_sec)
+    resp = json.loads(
+        send_line(
+            json.dumps({"cmd": "prov.wifi", "wifi_ssid": wifi_ssid, "wifi_pass": wifi_pass}, ensure_ascii=False)
+        )
+    )
+    if resp.get("status") != "ok":
+        raise RuntimeError(f"prov.wifi failed: {resp}")
+
+
+def _offer_and_wait_boot_confirm(
+    send_line: Callable[[str], str],
+    device_name: Optional[str],
+    poll_interval_sec: float,
+    confirm_timeout_sec: float,
+) -> None:
     host_label = device_name or socket.gethostname() or "NevoFlux-PC"
     offer_resp = json.loads(
-        send_line(json.dumps({"cmd": "prov.offer", "device": host_label}))
+        send_line(json.dumps({"cmd": "prov.offer", "device": host_label}, ensure_ascii=False))
     )
     if offer_resp.get("status") not in ("wait_boot", "ready"):
         raise RuntimeError(f"Unexpected prov.offer response: {offer_resp}")
@@ -274,25 +319,15 @@ def execute_provisioning_handshake(
         elif status == "idle":
             raise RuntimeError("Provisioning offer expired or was cancelled on pendant")
 
-    write_payload = {
-        "cmd": "prov.write",
-        "wifi_ssid": wifi_ssid,
-        "wifi_pass": wifi_pass,
-        "relay_url": relay_url,
-        "account_token": account_token,
-        "control_channel_id": material.control_channel_id,
-        "control_key_hex": material.control_key_hex,
-        "data_channel_id": material.data_channel_id,
-        "data_key_hex": material.data_key_hex,
-    }
-    write_resp = json.loads(send_line(json.dumps(write_payload)))
-    if write_resp.get("status") != "ok":
-        raise RuntimeError(f"prov.write failed: {write_resp}")
-
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="NevoFlux Voice Pendant Provisioning Tool")
-    parser.add_argument("--code", required=True, help="Pairing code from desktop /pair-device")
+    parser.add_argument("--code", help="Pairing code from desktop /pair-device (not needed with --wifi-only)")
+    parser.add_argument(
+        "--wifi-only",
+        action="store_true",
+        help="Only write WiFi SSID/password (prov.wifi); keeps existing NevoFlux pairing",
+    )
     parser.add_argument("--token", help="7-day independent account_token (if omitted, runs Device Grant)")
     parser.add_argument("--ssid", default="", help="WiFi SSID to write to shared pendant NVS")
     parser.add_argument("--password", default="", help="WiFi password to write to shared pendant NVS")
@@ -301,6 +336,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--port", help="USB Serial port (e.g. /dev/ttyACM0); if omitted, prints JSON bundle")
     parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate")
     args = parser.parse_args(argv)
+
+    if args.wifi_only:
+        return _main_wifi_only(args)
+    if not args.code:
+        parser.error("--code is required unless --wifi-only is given")
 
     print("[1/3] 正在派生双通道 ID 与 AES-256-GCM 密钥 (Argon2id m=65536, t=3, p=4)...")
     material = derive_pairing_material(args.code)
@@ -377,6 +417,65 @@ def main(argv: Optional[list[str]] = None) -> int:
             relay_url=args.relay_url,
         )
     print("[OK] 配对凭证与 WiFi 配置已成功写入吊坠 NVS！")
+    return 0
+
+
+def _open_line_transport(port: str, baud: int):
+    """Return a context manager yielding `send_line(request_json) -> response_json`."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx():
+        if port.startswith(("tcp://", "socket://")):
+            host, port_str = port.split("://", 1)[1].rsplit(":", 1)
+            with socket.create_connection((host, int(port_str)), timeout=5.0) as sock:
+                f = sock.makefile("rwb", buffering=0)
+
+                def rpc(line: str) -> str:
+                    f.write((line + "\n").encode("utf-8"))
+                    while True:
+                        raw_bytes = f.readline()
+                        if not raw_bytes:
+                            raise RuntimeError("UART TCP connection closed before JSON response")
+                        raw = raw_bytes.decode("utf-8", errors="ignore").strip()
+                        if raw.startswith("{") and raw.endswith("}"):
+                            return raw
+
+                yield rpc
+            return
+
+        import serial  # type: ignore
+
+        with serial.Serial(port, baud, timeout=1.0) as ser:
+            ser.reset_input_buffer()
+
+            def rpc(line: str) -> str:
+                ser.write((line + "\n").encode("utf-8"))
+                ser.flush()
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    raw = ser.readline().decode("utf-8", errors="ignore").strip()
+                    # Firmware log lines share the console; only JSON lines are RPC replies.
+                    if raw.startswith("{") and raw.endswith("}"):
+                        return raw
+                raise TimeoutError(f"No JSON reply from pendant on {port} (is the Launcher running?)")
+
+            yield rpc
+
+    return _ctx()
+
+
+def _main_wifi_only(args: argparse.Namespace) -> int:
+    if not args.ssid:
+        print("[错误] --wifi-only 需要 --ssid", file=sys.stderr)
+        return 2
+    if not args.port:
+        print("[错误] --wifi-only 需要 --port (例如 /dev/ttyACM0 或 COM5)", file=sys.stderr)
+        return 2
+    print(f"[1/2] 正在连接 {args.port}，请在吊坠屏幕提示后 15 秒内单击 BOOT 键确认...")
+    with _open_line_transport(args.port, args.baud) as rpc:
+        execute_wifi_provisioning(send_line=rpc, wifi_ssid=args.ssid, wifi_pass=args.password)
+    print(f"[2/2] [OK] WiFi \"{args.ssid}\" 已写入吊坠 NVS，设备将立即尝试连接。")
     return 0
 
 

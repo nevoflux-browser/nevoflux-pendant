@@ -36,7 +36,7 @@ bool bsp_audio_write_spk(const int16_t *pcm_in, size_t samples_to_write, size_t 
 void bsp_audio_set_pa_enable(bool enable);
 
 /* =========================================================================
- * 2. Display Subsystem (SH8601 466x466 QSPI + Minimal UI + Storage Font mmap)
+ * 2. Display Subsystem (CO5300 466x466 QSPI + LVGL 9 UI + CST820 touch)
  * ========================================================================= */
 
 typedef enum {
@@ -60,6 +60,15 @@ bool bsp_display_init(void);
 void bsp_display_render_nevoflux(const bsp_ui_status_t *status);
 void bsp_display_render_launcher(int highlighted_system, const char *wifi_ssid, bool is_paired, const char *prompt);
 bsp_ui_touch_action_t bsp_display_poll_touch(void);
+
+/** Generic screen: title, accent status line, wrapped body text + "switch system" button. */
+void bsp_display_render_status(const char *title, const char *status, const char *body);
+
+/** Network line shown under the title on every screen (e.g. "WiFi: MyAP · 192.168.1.23"). */
+void bsp_display_set_net_info(const char *net_line);
+
+/** AMOLED brightness 0..255 (CO5300 cmd 0x51). */
+void bsp_display_set_brightness(uint8_t level);
 
 /* =========================================================================
  * 3. Power, Battery ADC & BOOT Button Gesture / Escape Handler

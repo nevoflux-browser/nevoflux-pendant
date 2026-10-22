@@ -12,8 +12,8 @@ idf_component_register(
         bsp_143c
         nf_proto
         prov_nvs
+        pendant_wifi
         esp_http_client
-        esp_websocket_client
         esp_wifi
         esp_event
         esp_netif

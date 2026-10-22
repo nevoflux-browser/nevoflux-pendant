@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "nevoflux_app.h"
+#include "pendant_wifi.h"
 
 #if defined(ESP_PLATFORM)
 #include "esp_log.h"
@@ -38,12 +39,18 @@ static void on_prov_applied(const pendant_config_t *pendant,
                             const nf_credentials_t *cred,
                             void *user_ctx)
 {
-    (void)pendant;
     (void)cred;
     (void)user_ctx;
     snprintf(s_app.screen_transcript,
              sizeof(s_app.screen_transcript),
              "凭证已更新，正在重连 Relay…");
+#if defined(ESP_PLATFORM)
+    if (pendant && pendant->has_wifi) {
+        (void)pendant_wifi_start(pendant->wifi_ssid, pendant->wifi_pass);
+    }
+#else
+    (void)pendant;
+#endif
 }
 
 #if defined(ESP_PLATFORM)
@@ -108,6 +115,9 @@ void app_main(void)
     }
 
 #if defined(ESP_PLATFORM)
+    (void)prov_usb_line_init();
+    (void)pendant_wifi_start(pendant_cfg.has_wifi ? pendant_cfg.wifi_ssid : NULL, pendant_cfg.wifi_pass);
+
     /* Pin real-time audio task to Core 1; keep Core 0 for WiFi, TLS WebSockets & UI */
     xTaskCreatePinnedToCore(audio_core1_task, "audio_c1", 6144, NULL, 10, NULL, 1);
     (void)esp_task_wdt_add(NULL);
@@ -115,6 +125,11 @@ void app_main(void)
 
     bsp_key_fsm_t key_fsm;
     bsp_key_init(&key_fsm);
+#if defined(ESP_PLATFORM)
+    char line_buf[1024];
+    char resp_buf[256];
+    uint64_t last_net_ms = 0ULL;
+#endif
 
     for (;;) {
 #if defined(ESP_PLATFORM)
@@ -129,6 +144,27 @@ void app_main(void)
         } else if (kev != BSP_KEY_EVENT_NONE) {
             nf_app_on_key_event(&s_app, kev);
         }
+
+#if defined(ESP_PLATFORM)
+        if (prov_usb_line_poll(line_buf, sizeof(line_buf)) &&
+            prov_rpc_handle_line(&s_prov_rpc, line_buf, t_ms, resp_buf, sizeof(resp_buf)) > 0) {
+            printf("%s\n", resp_buf);
+            fflush(stdout);
+            (void)prov_nvs_load_pendant(&pendant_cfg);
+            (void)prov_nvs_load_nf_cfg(&nf_cred);
+        }
+        if (t_ms - last_net_ms >= 500ULL) {
+            char net_line[96];
+            pendant_wifi_format_line(net_line, sizeof(net_line));
+            bsp_display_set_net_info(net_line);
+            last_net_ms = t_ms;
+        }
+        pendant_wifi_status_t wifi_st;
+        pendant_wifi_get_status(&wifi_st);
+        const bool wifi_up = (wifi_st.state == PENDANT_WIFI_CONNECTED);
+#else
+        const bool wifi_up = pendant_cfg.has_wifi;
+#endif
 
         bsp_ui_touch_action_t touch = bsp_display_poll_touch();
         if (touch == BSP_UI_TOUCH_SWITCH_SYS) {
@@ -149,7 +185,7 @@ void app_main(void)
         }
 
         bsp_ui_status_t ui_st = {
-            .wifi_connected = pendant_cfg.has_wifi,
+            .wifi_connected = wifi_up,
             .relay_connected = nf_cred.is_paired,
             .daemon_online = nf_cred.is_paired,
             .battery_percent = bsp_power_get_battery_percent(NULL),

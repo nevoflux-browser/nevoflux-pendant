@@ -103,6 +103,10 @@ int prov_rpc_handle_line(prov_rpc_ctx_t *ctx,
 
 bool prov_hex_to_bytes(const char *hex, size_t hex_len, uint8_t *out_bytes, size_t out_len);
 
+/* USB Serial/JTAG line transport for JSON-RPC (ESP-IDF only). Non-blocking. */
+bool prov_usb_line_init(void);
+bool prov_usb_line_poll(char *out_line, size_t out_cap);
+
 #ifdef __cplusplus
 }
 #endif
