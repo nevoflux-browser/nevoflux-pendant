@@ -930,6 +930,9 @@ int main(int argc, char **argv)
                                            SDL_WINDOW_SHOWN);
         if (win) {
             SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+            if (!ren) {
+                ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
+            }
             SDL_Texture *tex = SDL_CreateTexture(ren,
                                                  SDL_PIXELFORMAT_ARGB8888,
                                                  SDL_TEXTUREACCESS_STREAMING,
@@ -937,6 +940,9 @@ int main(int argc, char **argv)
                                                  BSP_LCD_V_RES);
             cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, BSP_LCD_H_RES, BSP_LCD_V_RES);
             sim_init(0);
+            printf("[SDL2] 466x466 Round AMOLED Window Started!\n");
+            printf("       Mouse Click: Tap on-screen buttons\n");
+            printf("       Keys: [1]=Launcher [2]=PTT [3]=TTS 24kHz [4]=Meeting [5]=Muse OAuth2 [Space]=Hold PTT [M]=Meeting [Q/Esc]=Quit\n");
 
             bool running = true;
             while (running) {
@@ -944,9 +950,32 @@ int main(int argc, char **argv)
                 while (SDL_PollEvent(&ev)) {
                     if (ev.type == SDL_QUIT) running = false;
                     else if (ev.type == SDL_MOUSEBUTTONDOWN) sim_touch_xy(ev.button.x, ev.button.y);
-                    else if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_SPACE) sim_set_boot_button(true);
-                    else if (ev.type == SDL_KEYUP && ev.key.keysym.sym == SDLK_SPACE) sim_set_boot_button(false);
-                    else if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_m) sim_trigger_double_click_boot();
+                    else if (ev.type == SDL_KEYDOWN) {
+                        SDL_Keycode k = ev.key.keysym.sym;
+                        if (k == SDLK_ESCAPE || k == SDLK_q) running = false;
+                        else if (k == SDLK_SPACE) sim_set_boot_button(true);
+                        else if (k == SDLK_m) sim_trigger_double_click_boot();
+                        else if (k == SDLK_1) sim_init(0);
+                        else if (k == SDLK_2) {
+                            sim_init(1);
+                            sim_set_boot_button(true);
+                            sim_step_ms(400);
+                            sim_inject_speech_partial("帮我查一下上周关于语音吊坠双分区架构的纪要…");
+                        } else if (k == SDLK_3) {
+                            sim_init(1);
+                            sim_inject_speech_final("帮我查一下上周关于语音吊坠双分区架构的纪要。", true);
+                            sim_inject_tts_asset("已为您查到 GBrain 纪要：语音吊坠采用 8MB 三明治分区（Launcher + Muse + NevoFlux），语音全程在本地 Daemon 处理。", 24000U);
+                        } else if (k == SDLK_4) {
+                            sim_init(1);
+                            sim_trigger_double_click_boot();
+                            sim_step_ms(200);
+                            sim_inject_speech_final("【实时会议转写 #12】确定 10 月 22 日完成 NFA1 上行与 NFM1 下行端到端联调。", true);
+                        } else if (k == SDLK_5) {
+                            sim_init(2);
+                        }
+                    } else if (ev.type == SDL_KEYUP && ev.key.keysym.sym == SDLK_SPACE) {
+                        sim_set_boot_button(false);
+                    }
                 }
                 sim_step_ms(20);
                 render_to_surface(surf);
@@ -965,7 +994,7 @@ int main(int argc, char **argv)
         }
     }
 #endif
-    printf("No X11 DISPLAY detected for SDL2 window; use `tools/sim/sim_server.py` for Web UI or `--dump-snapshots <dir>`.\n");
+    printf("No X11/Wayland DISPLAY detected for SDL2 window (%s); use `make sim-web` for Web UI or `--dump-snapshots <dir>`.\n", SDL_GetError());
     return 0;
 }
 #endif

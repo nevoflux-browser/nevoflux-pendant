@@ -30,7 +30,7 @@ FW_SRCS := \
 LIB_TARGET := libnevoflux_sim.so
 BIN_TARGET := nevoflux_sim
 
-.PHONY: all clean snapshots
+.PHONY: all clean snapshots run-sdl web
 
 all: $(LIB_TARGET) $(BIN_TARGET)
 
@@ -40,6 +40,12 @@ $(LIB_TARGET): nevoflux_sim.c $(FW_SRCS)
 $(BIN_TARGET): nevoflux_sim.c $(FW_SRCS)
 	$(CC) $(CFLAGS) -DSIM_STANDALONE_MAIN nevoflux_sim.c $(FW_SRCS) -o $(BIN_TARGET) $(PKG_LIBS)
 
+run-sdl: $(BIN_TARGET)
+	./$(BIN_TARGET)
+
+web: $(LIB_TARGET)
+	python3 sim_server.py --port 8765
+
 snapshots: $(BIN_TARGET)
 	mkdir -p snapshots
 	./$(BIN_TARGET) --dump-snapshots snapshots
@@ -47,3 +53,4 @@ snapshots: $(BIN_TARGET)
 clean:
 	rm -f $(LIB_TARGET) $(BIN_TARGET)
 	rm -rf snapshots
+
