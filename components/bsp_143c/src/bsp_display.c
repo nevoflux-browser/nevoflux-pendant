@@ -340,7 +340,10 @@ bool bsp_display_init(void)
         .vres = BSP_LCD_V_RES,
         .monochrome = false,
         .color_format = LV_COLOR_FORMAT_RGB565,
-        .rotation = { .swap_xy = false, .mirror_x = false, .mirror_y = false },
+        /* lvgl_port_add_disp() calls esp_lcd_panel_mirror(mirror_x, mirror_y), and the sh8601
+         * driver maps mirror_x to MADCTL BIT6. mirror_x=true keeps the official 0xC0 MADCTL;
+         * false would clear BIT6 (0x80) and show a mirrored image. */
+        .rotation = { .swap_xy = false, .mirror_x = true, .mirror_y = false },
         .flags = { .buff_dma = true, .buff_spiram = false, .swap_bytes = true },
     };
     s_disp = lvgl_port_add_disp(&disp_cfg);

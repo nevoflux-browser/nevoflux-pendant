@@ -35,3 +35,6 @@ CONFIG_LV_BUILD_EXAMPLES=n
 
 # SoftAP is never used (STA only)
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
+
+# app_main runs panel/LVGL/WiFi init plus 1.3KB RPC line buffers; 3584 default overflows
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240

@@ -23,3 +23,6 @@ CONFIG_LV_BUILD_EXAMPLES=n
 
 # SoftAP is never used (STA only)
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
+
+# app_main also runs TLS (OAuth device flow) + 2KB of request buffers
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384

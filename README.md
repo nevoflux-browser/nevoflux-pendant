@@ -163,7 +163,9 @@ UI fonts (`components/bsp_143c/src/fonts/`) are subset to the strings used in th
    pip install esptool pyserial
    ```
 
-3. **Find the COM port.** Connect the board over USB-C (the ESP32-S3 native USB uses the built-in Win10 driver). In Device Manager → *Ports (COM & LPT)*, note the "USB Serial Device (COMx)". If no port appears or flashing fails to connect, enter download mode: hold `BOOT`, tap `RESET`, release `BOOT` (the COM number may change).
+3. **Power on and find the COM port.** Connect the board over USB-C (the ESP32-S3 native USB uses the built-in Win10 driver), then **long-press `PWR` for 2–3 s** — the board has a power latch and stays off (dark screen, "USB device not recognized" / Code 43) until powered on. In Device Manager → *Ports (COM & LPT)*, note the "USB Serial Device (COMx)".
+
+   If no port appears (e.g. Code 43 while the factory demo runs) or flashing fails to connect, enter download mode: hold `BOOT`, long-press `PWR` (or tap `RESET` if already on), release `PWR`, then release `BOOT`. The screen stays dark in download mode and the COM number may change.
 
 4. **Flash** (examples use `COM5`):
 
@@ -171,7 +173,7 @@ UI fonts (`components/bsp_143c/src/fonts/`) are subset to the strings used in th
    python -m esptool --chip esp32s3 -p COM5 -b 921600 write_flash 0x0 C:\fw\nevoflux-pendant-8MB.bin
    ```
 
-   Success ends with `Hash of data verified.` On errors retry with `-b 460800`. If you used download mode, press `RESET` afterwards. The merged image erases NVS, so WiFi must be provisioned again after every full flash.
+   Success ends with `Hash of data verified.` On errors retry with `-b 460800`. If you used download mode, press `RESET` afterwards (long-press `PWR` if the screen stays dark). The merged image erases NVS, so WiFi must be provisioned again after every full flash.
 
 5. **Provision WiFi** once the Launcher is running (not in download mode), and click `BOOT` within 15s when the screen prompts. Only 2.4 GHz networks are supported.
 
