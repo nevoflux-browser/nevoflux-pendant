@@ -45,6 +45,7 @@ typedef enum {
     BSP_UI_TOUCH_TOGGLE_MEET  = 2, /* Bottom button: Toggle Meeting Mode */
     BSP_UI_TOUCH_BOOT_MUSE    = 3, /* Launcher card: Boot ota_0 (Muse) */
     BSP_UI_TOUCH_BOOT_NEVO    = 4, /* Launcher card: Boot ota_1 (NevoFlux) */
+    BSP_UI_TOUCH_TOGGLE_BLE   = 5, /* Launcher bottom button: open/close BLE provisioning */
 } bsp_ui_touch_action_t;
 
 typedef struct {
@@ -66,6 +67,8 @@ void bsp_display_render_status(const char *title, const char *status, const char
 
 /** Network line shown under the title on every screen (e.g. "WiFi: MyAP · 192.168.1.23"). */
 void bsp_display_set_net_info(const char *net_line);
+/* Launcher BLE provisioning button: hidden when !available, highlighted while on. */
+void bsp_display_set_ble_button(bool available, bool on);
 
 /** AMOLED brightness 0..255 (CO5300 cmd 0x51). */
 void bsp_display_set_brightness(uint8_t level);

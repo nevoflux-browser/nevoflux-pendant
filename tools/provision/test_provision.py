@@ -3,6 +3,7 @@ import json
 import unittest
 
 from provision import (
+    _BleLineClient,
     DerivedPairingMaterial,
     derive_channel_id,
     derive_pairing_material,
@@ -60,6 +61,21 @@ class TestProvisioning(unittest.TestCase):
         self.assertEqual(state["written"]["account_token"], "tok_independent_7d")
         self.assertEqual(state["written"]["data_channel_id"], mat.data_channel_id)
         self.assertEqual(state["written"]["data_key_hex"], mat.data_key_hex)
+
+
+    def test_ble_notify_reassembles_chunked_lines(self) -> None:
+        import queue
+
+        client = object.__new__(_BleLineClient)  # skip __init__ (no BLE adapter / bleak needed)
+        client._buf = b""
+        client._lines = queue.Queue()
+        reply = '{"status":"ok","ssid":"家里的WiFi"}\n'.encode("utf-8")
+        # MTU-sized notifications may split a UTF-8 character and carry two replies at once
+        for chunk in (reply[:7], reply[7:20], reply[20:] + b'{"status":"idle"}\n'):
+            client._on_notify(None, bytearray(chunk))
+        self.assertEqual(json.loads(client._lines.get_nowait())["ssid"], "家里的WiFi")
+        self.assertEqual(client._lines.get_nowait(), '{"status":"idle"}')
+        self.assertTrue(client._lines.empty())
 
 
 if __name__ == "__main__":

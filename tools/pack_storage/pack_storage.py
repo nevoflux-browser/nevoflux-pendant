@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Pack shared `storage` partition binary (0x6A0000, size 1.375MB = 1441792 bytes)
+Pack shared `storage` partition binary (0x720000, size 896KB = 917504 bytes)
 for zero-copy `esp_partition_mmap` access by both `factory` (Launcher) and
 `ota_1` (NevoFlux firmware).
 
@@ -23,7 +23,7 @@ import struct
 STORAGE_MAGIC = b"NFST"
 STORAGE_VERSION = 1
 STORAGE_HEADER_SIZE = 32
-STORAGE_MAX_BYTES = 0x160000  # 1,441,792 bytes (1.375 MB)
+STORAGE_MAX_BYTES = 0xE0000  # 917,504 bytes (896 KB)
 
 
 def build_storage_image(font_bytes: bytes, vad_bytes: bytes) -> bytes:

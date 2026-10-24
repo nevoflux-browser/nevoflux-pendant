@@ -11,4 +11,5 @@ idf_component_register(
         app_update
         esp_partition
         esp_timer
+        bt
 )

@@ -169,14 +169,22 @@ uint8_t bsp_power_get_battery_percent(uint32_t *out_mv)
         mv = (uint32_t)((float)pin_mv * BSP_BAT_DIVIDER_RATIO);
     }
 #endif
+    /* Smooth ADC noise (EMA, alpha = 1/8) and add hysteresis so the shown percentage
+     * does not flip back and forth on a boundary (e.g. 99% <-> 100%) every refresh. */
+    static float s_mv_filt = 0.0f;
+    static int s_pct = -1;
+    s_mv_filt = (s_mv_filt <= 0.0f) ? (float)mv : s_mv_filt + ((float)mv - s_mv_filt) / 8.0f;
     if (out_mv) {
-        *out_mv = mv;
+        *out_mv = (uint32_t)(s_mv_filt + 0.5f);
     }
-    if (mv <= 3300U) {
-        return 0U;
+    float pct_f = (s_mv_filt - 3300.0f) * 100.0f / 900.0f;
+    if (pct_f < 0.0f) {
+        pct_f = 0.0f;
+    } else if (pct_f > 100.0f) {
+        pct_f = 100.0f;
     }
-    if (mv >= 4200U) {
-        return 100U;
+    if (s_pct < 0 || pct_f > (float)s_pct + 0.75f || pct_f < (float)s_pct - 0.75f) {
+        s_pct = (int)(pct_f + 0.5f);
     }
-    return (uint8_t)(((mv - 3300U) * 100U) / 900U);
+    return (uint8_t)s_pct;
 }

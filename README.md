@@ -21,7 +21,7 @@ Pin assignments in `components/bsp_143c/include/bsp_143c_pins.h` follow the offi
 
 ```text
 nevoflux-pendant/
-├── partitions.csv                 # 8MB Flash partition layout (factory 1MB, ota_0 3MB, ota_1 2.5MB, storage 1.375MB)
+├── partitions.csv                 # 8MB Flash partition layout (factory 1.5MB, ota_0 3MB, ota_1 2.5MB, storage 896KB)
 ├── Makefile                       # Host-side gcc & python3 test runner and storage partition packer
 ├── components/
 │   ├── nf_proto/                  # NFA1 (24B BE) & NFM1 (22+idLen BE) codecs, WAV parser, SequenceTracker, AES-256-GCM
@@ -46,10 +46,10 @@ nevoflux-pendant/
 | `nvs` | `data` / `nvs` | `0x009000` | 24 KB | Shared `pendant` WiFi config, `muse_cfg` OAuth token, and `nf_cfg` pairing credentials |
 | `otadata` | `data` / `ota` | `0x00F000` | 8 KB | Bootloader active OTA selector (erasing falls back to `factory`) |
 | `phy_init` | `data` / `phy` | `0x011000` | 4 KB | RF calibration data |
-| `factory` | `app` / `factory` | `0x020000` | **1.0 MB** | **Launcher**: Dual-boot UI + NimBLE GATT & USB Serial provisioning |
-| `ota_0` | `app` / `ota_0` | `0x120000` | **3.0 MB** | **Muse Partition**: Official [`facebookincubator/muse-gadget-sdk`](https://github.com/facebookincubator/muse-gadget-sdk) + RFC 8628 Device Flow |
-| `ota_1` | `app` / `ota_1` | `0x420000` | **2.5 MB** | **NevoFlux Partition**: Native C client (`CONFIG_BT_ENABLED=n`) |
-| `storage` | `data` / `spiffs` | `0x6A0000` | **1.375 MB** | Shared zero-copy `mmap` image (20px CJK font + ESP-SR VAD model) |
+| `factory` | `app` / `factory` | `0x020000` | **1.5 MB** | **Launcher**: Dual-boot UI + NimBLE (Nordic UART Service) & USB Serial provisioning |
+| `ota_0` | `app` / `ota_0` | `0x1A0000` | **3.0 MB** | **Muse Partition**: Official [`facebookincubator/muse-gadget-sdk`](https://github.com/facebookincubator/muse-gadget-sdk) + RFC 8628 Device Flow |
+| `ota_1` | `app` / `ota_1` | `0x4A0000` | **2.5 MB** | **NevoFlux Partition**: Native C client (`CONFIG_BT_ENABLED=n`) |
+| `storage` | `data` / `spiffs` | `0x720000` | **896 KB** | Shared zero-copy `mmap` image (20px CJK font + ESP-SR VAD model) |
 
 ## Dual-System Authentication Flows
 
@@ -115,6 +115,16 @@ python3 tools/provision/provision.py \
 - The tool performs an independent **Device Authorization Grant** (minting a dedicated 7-day `account_token` for the pendant so it can be revoked independently if lost) and derives the 32-byte AES-256-GCM keys on the host using `Argon2id (m=65536, t=3, p=4)`.
 - When prompted on the pendant screen, **click the `BOOT` button once within 15 seconds** to confirm physical presence and commit the credentials to NVS.
 
+**Bluetooth LE** works the same way (`pip install bleak`; Windows 10/11, Linux, macOS). BLE is **off by default**: tap **开启蓝牙配网** on the Launcher screen to advertise `NevoFlux-XXXX` (shown on screen) with the Nordic UART Service for 3 minutes. It closes automatically after a successful write, on timeout, or when tapped again:
+
+```bash
+python3 tools/provision/provision.py --wifi-only --port ble --ssid "<WIFI_SSID>" --password "<WIFI_PASS>"
+# pick a specific pendant: --port ble:NevoFlux-1A2B  (or its BLE address)
+```
+
+Any BLE UART app (e.g. nRF Connect / nRF Toolbox) can also be used: write one JSON request per line to RX `6E400002-B5A3-F393-E0A9-E50E24DCCA9E` and read replies from TX `6E400003-…` notifications — `{"cmd":"prov.offer","device":"Phone"}`, click `BOOT`, then `{"cmd":"prov.wifi","wifi_ssid":"…","wifi_pass":"…"}`.
+The BLE link is not encrypted (no pairing); opening the window on screen and the `BOOT` press are the gates, so provision in a trusted place.
+
 ### 5. Build & Flash ESP32-S3 Firmware (ESP-IDF)
 
 Builds all three apps with ESP-IDF v5.3.2 in Docker (no local IDF needed) and writes flashable images to `build/firmware/`:
@@ -160,7 +170,7 @@ UI fonts (`components/bsp_143c/src/fonts/`) are subset to the strings used in th
 2. **Install Python 3** (tick "Add python.exe to PATH"), then:
 
    ```bat
-   pip install esptool pyserial
+   pip install esptool pyserial bleak
    ```
 
 3. **Power on and find the COM port.** Connect the board over USB-C (the ESP32-S3 native USB uses the built-in Win10 driver), then **long-press `PWR` for 2–3 s** — the board has a power latch and stays off (dark screen, "USB device not recognized" / Code 43) until powered on. In Device Manager → *Ports (COM & LPT)*, note the "USB Serial Device (COMx)".
@@ -180,6 +190,8 @@ UI fonts (`components/bsp_143c/src/fonts/`) are subset to the strings used in th
    ```bat
    python C:\fw\provision.py --wifi-only --port COM5 --ssid "MyRouter" --password "secret"
    ```
+
+   Or over Bluetooth (PC Bluetooth on, no cable needed; first tap **开启蓝牙配网** on the Launcher): `python C:\fw\provision.py --wifi-only --port ble --ssid "MyRouter" --password "secret"`.
 
 6. **Serial log** for troubleshooting (close other programs using the port, press `RESET`, exit with `Ctrl+]`):
 

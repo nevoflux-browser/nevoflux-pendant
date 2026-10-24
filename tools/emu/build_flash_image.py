@@ -9,9 +9,9 @@ Flash layout (strictly matching `partitions.csv`):
   0x00F000  `otadata`  (8 KB)   - Dual-OTA boot selector (`ota_seq` + CRC32)
   0x011000  `phy_init` (4 KB)   - RF PHY calibration data
   0x020000  `factory`  (1 MB)   - NevoFlux Dual-Boot Launcher (`apps/launcher`)
-  0x120000  `ota_0`    (3 MB)   - Muse Assistant (`facebookincubator/muse-gadget-sdk` + RFC 8628 Device Flow)
-  0x420000  `ota_1`    (2.5 MB) - NevoFlux Private Cloud Assistant (`apps/nevoflux`)
-  0x6A0000  `storage`  (1.375MB)- Shared zero-copy `mmap` assets (`NFST`: 20px CJK font + ESP-SR VAD)
+  0x1A0000  `ota_0`    (3 MB)   - Muse Assistant (`facebookincubator/muse-gadget-sdk` + RFC 8628 Device Flow)
+  0x4A0000  `ota_1`    (2.5 MB) - NevoFlux Private Cloud Assistant (`apps/nevoflux`)
+  0x720000  `storage`  (896KB)  - Shared zero-copy `mmap` assets (`NFST`: 20px CJK font + ESP-SR VAD)
 
 If ESP-IDF build outputs (`apps/*/build/*.bin`) exist, they are merged into the image.
 Otherwise, a native Xtensa LX7 ESP32-S3 binary is assembled so `esp-emu --chip esp32s3`
@@ -238,12 +238,12 @@ def pack_esp32s3_image(entry_addr: int, segments: list[tuple[int, bytes]]) -> by
 def build_native_s3_firmware() -> bytes:
     """
     Build a self-contained Xtensa LX7 ESP32-S3 firmware image that:
-      1. Reads & logs the binary partition table at 0x8000 and `storage.bin` at 0x6A0000
+      1. Reads & logs the binary partition table at 0x8000 and `storage.bin` at 0x720000
       2. Checks NVS provisioning data at 0x9000
       3. Inspects `otadata` at 0xF000 (`ota_seq`) and boots into:
          - `factory` (0x020000): NevoFlux Dual-Boot Launcher
-         - `ota_0`   (0x120000): Muse Assistant (muse-gadget-sdk + RFC 8628 OAuth2 Device Flow)
-         - `ota_1`   (0x420000): NevoFlux Private Cloud Assistant (Relay WSS + Opus 16k/24k)
+         - `ota_0`   (0x1A0000): Muse Assistant (muse-gadget-sdk + RFC 8628 OAuth2 Device Flow)
+         - `ota_1`   (0x4A0000): NevoFlux Private Cloud Assistant (Relay WSS + Opus 16k/24k)
       4. Polls UART0 for:
          - '0' -> switch `otadata` to `ota_0` (Muse) & warm reset (`RTC_SW_SYS_RST`)
          - '1' -> switch `otadata` to `ota_1` (NevoFlux) & warm reset (`RTC_SW_SYS_RST`)
@@ -274,13 +274,13 @@ def build_native_s3_firmware() -> bytes:
         "I (14) boot:   0: nvs      data nvs     0x009000 0x006000\r\n"
         "I (16) boot:   1: otadata  data ota     0x00f000 0x002000\r\n"
         "I (18) boot:   2: phy_init data phy     0x011000 0x001000\r\n"
-        "I (20) boot:   3: factory  app  factory 0x020000 0x100000 (Launcher)\r\n"
-        "I (22) boot:   4: ota_0    app  ota_0   0x120000 0x300000 (Muse SDK)\r\n"
-        "I (24) boot:   5: ota_1    app  ota_1   0x420000 0x280000 (NevoFlux)\r\n"
-        "I (26) boot:   6: storage  data spiffs  0x6a0000 0x160000 (Shared mmap)\r\n",
+        "I (20) boot:   3: factory  app  factory 0x020000 0x180000 (Launcher)\r\n"
+        "I (22) boot:   4: ota_0    app  ota_0   0x1A0000 0x300000 (Muse SDK)\r\n"
+        "I (24) boot:   5: ota_1    app  ota_1   0x4A0000 0x280000 (NevoFlux)\r\n"
+        "I (26) boot:   6: storage  data spiffs  0x720000 0x0e0000 (Shared mmap)\r\n",
     )
     s_storage = add_str(
-        "I (32) storage_mmap: Mapped partition 'storage' @ 0x6a0000 (magic=%.4s)\r\n",
+        "I (32) storage_mmap: Mapped partition 'storage' @ 0x720000 (magic=%.4s)\r\n",
     )
     s_nvs_empty = add_str(
         "W (38) prov_nvs: NVS @ 0x009000 unprovisioned (awaiting UART/BLE prov.write)\r\n",
@@ -294,14 +294,14 @@ def build_native_s3_firmware() -> bytes:
         "I (62) launcher: [UART Commands] '0'=Boot Muse (ota_0) | '1'=Boot NevoFlux (ota_1) | JSON=provision.py\r\n",
     )
     s_boot_ota0 = add_str(
-        "I (45) boot: otadata ota_seq=0x%08x -> booting [ota_0] Muse Assistant @ 0x120000\r\n"
+        "I (45) boot: otadata ota_seq=0x%08x -> booting [ota_0] Muse Assistant @ 0x1A0000\r\n"
         "I (70) muse_app: facebookincubator/muse-gadget-sdk initialized\r\n"
         "I (75) muse_oauth: Starting RFC 8628 OAuth 2.0 Device Authorization Grant...\r\n"
         "I (80) muse_oauth: Display QR -> https://muse.ai/link | user_code: ABC-123\r\n"
         "I (82) muse_app: [UART Commands] 'l'=Return to Launcher | '1'=Switch to NevoFlux (ota_1)\r\n",
     )
     s_boot_ota1 = add_str(
-        "I (45) boot: otadata ota_seq=0x%08x -> booting [ota_1] NevoFlux Assistant @ 0x420000\r\n"
+        "I (45) boot: otadata ota_seq=0x%08x -> booting [ota_1] NevoFlux Assistant @ 0x4A0000\r\n"
         "I (70) nevoflux: Audio pipeline 16kHz Opus TX / 24kHz Opus RX initialized\r\n"
         "I (75) nevoflux: Connecting to wss://relay.nevoflux.app (Dual-Channel E2EE)...\r\n"
         "I (80) nevoflux: State=IDLE (Hold Touch=PTT | Double-Click BOOT=Meeting Mode | 5s=Launcher)\r\n"
@@ -359,8 +359,8 @@ def build_native_s3_firmware() -> bytes:
     # 1. Print Boot & Partition Table Banner
     asm.call_rom(ROM_ETS_PRINTF, s_banner)
 
-    # 2. Read storage.bin @ 0x6A0000 (16 bytes) & print NFST magic
-    asm.call_rom(ROM_SPIFLASH_READ, 0x6A0000, addr_storage_buf, 16)
+    # 2. Read storage.bin @ 0x720000 (16 bytes) & print NFST magic
+    asm.call_rom(ROM_SPIFLASH_READ, 0x720000, addr_storage_buf, 16)
     asm.call_rom(ROM_ETS_PRINTF, s_storage, addr_storage_buf)
 
     # 3. Read NVS @ 0x009000 (256 bytes) & check if provisioned (starts with '{' = 0x7B)
@@ -512,12 +512,12 @@ def build_merged_flash(
     pt_bytes = compile_partition_table(REPO_ROOT / "partitions.csv")
     flash[0x8000 : 0x8000 + len(pt_bytes)] = pt_bytes
 
-    # 2. Shared storage partition at 0x6A0000
+    # 2. Shared storage partition at 0x720000
     storage_bytes = build_storage_image(
         b"CJK_FONT_20PX_STUB",
         b"ESP_SR_VAD_MODEL_STUB",
     )
-    flash[0x6A0000 : 0x6A0000 + len(storage_bytes)] = storage_bytes
+    flash[0x720000 : 0x720000 + len(storage_bytes)] = storage_bytes
 
     # 3. Initial otadata at 0xF000
     ota_seq_map = {"factory": 0, "ota_0": 1, "ota_1": 2}
@@ -538,8 +538,8 @@ def build_merged_flash(
 
     flash[0x000000 : 0x000000 + len(bl_data)] = bl_data
     flash[0x020000 : 0x020000 + len(factory_data)] = factory_data
-    flash[0x120000 : 0x120000 + len(ota0_data)] = ota0_data
-    flash[0x420000 : 0x420000 + len(ota1_data)] = ota1_data
+    flash[0x1A0000 : 0x1A0000 + len(ota0_data)] = ota0_data
+    flash[0x4A0000 : 0x4A0000 + len(ota1_data)] = ota1_data
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(flash)

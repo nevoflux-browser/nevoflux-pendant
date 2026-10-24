@@ -1,7 +1,7 @@
 /*******************************************************************************
  * Size: 32 px
  * Bpp: 4
- * Opts: --no-compress --no-prefilter --bpp 4 --size 32 --format lvgl --lv-include lvgl.h --font /tmp/tmp_v29lvd5/face.otf --range 0x20-0x7E --symbols …中会听录待思报播机考聆议音 -o /ai/project/nevoflux-pendant/components/bsp_143c/src/fonts/nf_font_32.c
+ * Opts: --no-compress --no-prefilter --bpp 4 --size 32 --format lvgl --lv-include lvgl.h --font /tmp/tmp3kbshff8/face.otf --range 0x20-0x7E --symbols …中会听录待思报播机考聆议音 -o /ai/project/nevoflux-pendant/components/bsp_143c/src/fonts/nf_font_32.c
  ******************************************************************************/
 
 #ifdef LV_LVGL_H_INCLUDE_SIMPLE

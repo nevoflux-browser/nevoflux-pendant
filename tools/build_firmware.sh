@@ -6,10 +6,10 @@
 #   bootloader.bin            @ 0x0
 #   partition-table.bin       @ 0x8000
 #   ota_data_initial.bin      @ 0xF000   (blank otadata -> boots factory Launcher)
-#   nevoflux_launcher.bin     @ 0x20000  (factory)
-#   muse_gadget_pendant.bin   @ 0x120000 (ota_0)
-#   nevoflux_pendant.bin      @ 0x420000 (ota_1)
-#   storage.bin               @ 0x6A0000
+#   nevoflux_launcher.bin     @ 0x20000  (factory, 1.5MB)
+#   muse_gadget_pendant.bin   @ 0x1A0000 (ota_0)
+#   nevoflux_pendant.bin      @ 0x4A0000 (ota_1)
+#   storage.bin               @ 0x720000
 #   nevoflux-pendant-8MB.bin  merged image, flash at 0x0 (erases NVS -> WiFi must be re-provisioned)
 #   flash_args                esptool argument file for flashing the individual images (keeps NVS)
 #
@@ -69,9 +69,9 @@ cat > "$OUT/flash_args" <<'EOF'
 0x8000 partition-table.bin
 0xf000 ota_data_initial.bin
 0x20000 nevoflux_launcher.bin
-0x120000 muse_gadget_pendant.bin
-0x420000 nevoflux_pendant.bin
-0x6a0000 storage.bin
+0x1a0000 muse_gadget_pendant.bin
+0x4a0000 nevoflux_pendant.bin
+0x720000 storage.bin
 EOF
 
 # Partition fit check (sizes from partitions.csv)
@@ -81,10 +81,10 @@ check_fit() { # file max_bytes label
     (( sz <= $2 )) || { echo "ERROR: $3 does not fit its partition"; exit 1; }
 }
 echo "Partition usage:"
-check_fit "$OUT/nevoflux_launcher.bin"   $((0x100000)) "factory (launcher)"
+check_fit "$OUT/nevoflux_launcher.bin"   $((0x180000)) "factory (launcher)"
 check_fit "$OUT/muse_gadget_pendant.bin" $((0x300000)) "ota_0 (muse)"
 check_fit "$OUT/nevoflux_pendant.bin"    $((0x280000)) "ota_1 (nevoflux)"
-check_fit "$OUT/storage.bin"             $((0x160000)) "storage"
+check_fit "$OUT/storage.bin"             $((0xE0000)) "storage"
 
 
 echo "=================== Verifying & merging ==================="

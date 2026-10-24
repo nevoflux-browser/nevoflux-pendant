@@ -333,7 +333,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--password", default="", help="WiFi password to write to shared pendant NVS")
     parser.add_argument("--relay-url", default=DEFAULT_RELAY_URL, help="Relay WebSocket URL")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="NevoFlux web base URL for Device Grant")
-    parser.add_argument("--port", help="USB Serial port (e.g. /dev/ttyACM0); if omitted, prints JSON bundle")
+    parser.add_argument(
+        "--port",
+        help="USB serial port (/dev/ttyACM0, COM5), tcp://host:port, or ble / ble:NevoFlux-XXXX; "
+        "if omitted, prints JSON bundle",
+    )
     parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate")
     args = parser.parse_args(argv)
 
@@ -368,48 +372,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 0
 
-    if args.port.startswith(("tcp://", "socket://")):
-        addr_part = args.port.split("://", 1)[1]
-        host, port_str = addr_part.rsplit(":", 1)
-        print(f"[3/3] 正在连接模拟器 UART TCP 端口 {host}:{port_str}...")
-        with socket.create_connection((host, int(port_str)), timeout=5.0) as sock:
-            sock_file = sock.makefile("rwb", buffering=0)
-
-            def tcp_rpc(line: str) -> str:
-                sock_file.write((line + "\n").encode("utf-8"))
-                while True:
-                    raw_bytes = sock_file.readline()
-                    if not raw_bytes:
-                        raise RuntimeError("UART TCP connection closed before JSON response")
-                    raw = raw_bytes.decode("utf-8", errors="ignore").strip()
-                    if raw.startswith("{") and raw.endswith("}"):
-                        return raw
-
-            execute_provisioning_handshake(
-                send_line=tcp_rpc,
-                material=material,
-                account_token=account_token,
-                wifi_ssid=args.ssid,
-                wifi_pass=args.password,
-                relay_url=args.relay_url,
-            )
-        print("[OK] 配对凭证与 WiFi 配置已成功写入模拟器 NVS！")
-        return 0
-
-    import serial  # type: ignore
-
-    print(f"[3/3] 正在连接串口 {args.port}，请在吊坠提示后 15 秒内按一下 BOOT 键确认...")
-    with serial.Serial(args.port, args.baud, timeout=2.0) as ser:
-        def serial_rpc(line: str) -> str:
-            ser.write((line + "\n").encode("utf-8"))
-            ser.flush()
-            while True:
-                raw = ser.readline().decode("utf-8", errors="ignore").strip()
-                if raw.startswith("{") and raw.endswith("}"):
-                    return raw
-
+    print(f"[3/3] 正在连接 {args.port}，请在吊坠提示后 15 秒内按一下 BOOT 键确认...")
+    with _open_line_transport(args.port, args.baud) as rpc:
         execute_provisioning_handshake(
-            send_line=serial_rpc,
+            send_line=rpc,
             material=material,
             account_token=account_token,
             wifi_ssid=args.ssid,
@@ -420,12 +386,128 @@ def main(argv: Optional[list[str]] = None) -> int:
     return 0
 
 
+BLE_NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+BLE_NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # write: PC -> pendant
+BLE_NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # notify: pendant -> PC
+BLE_NAME_PREFIX = "NevoFlux-"
+
+
+class _BleLineClient:
+    """Blocking newline-delimited JSON-RPC over the pendant's BLE Nordic UART Service.
+
+    `target` is "" (first device advertising "NevoFlux-*"), a full device name
+    such as "NevoFlux-1A2B", or a BLE address. Requires `pip install bleak`.
+    """
+
+    def __init__(self, target: str, reply_timeout_sec: float = 5.0) -> None:
+        import asyncio
+        import queue
+        import threading
+
+        try:
+            import bleak  # type: ignore  # noqa: F401
+        except ImportError as exc:  # pragma: no cover - depends on host packages
+            raise RuntimeError("BLE 配网需要 bleak：pip install bleak") from exc
+
+        self._target = target
+        self._timeout = reply_timeout_sec
+        self._lines: "queue.Queue[str]" = queue.Queue()
+        self._buf = b""
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
+        self._thread.start()
+        self._client = None
+        self._run(self._connect(), timeout=40.0)
+
+    def _run(self, coro, timeout: float):
+        import asyncio
+
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout)
+
+    async def _connect(self) -> None:
+        from bleak import BleakClient, BleakScanner  # type: ignore
+
+        target = self._target
+        # MAC address (Windows/Linux) or CoreBluetooth UUID (macOS) -> connect directly
+        is_address = ":" in target or (len(target) == 36 and target.count("-") == 4)
+        if is_address:
+            device = await BleakScanner.find_device_by_address(target, timeout=15.0)
+        else:
+            want = target or BLE_NAME_PREFIX
+
+            def match(dev, adv) -> bool:
+                name = (adv.local_name or dev.name or "")
+                return name == want if target else name.startswith(BLE_NAME_PREFIX)
+
+            device = await BleakScanner.find_device_by_filter(match, timeout=15.0)
+        if device is None:
+            raise RuntimeError(
+                f"未找到蓝牙设备 {target or BLE_NAME_PREFIX + '*'}"
+                "（请在吊坠 Launcher 界面点「开启蓝牙配网」，3 分钟内有效）"
+            )
+        print(f"    已找到 {device.name or ''} [{device.address}]，正在连接...")
+        self._client = BleakClient(device)
+        await self._client.connect()
+        await self._client.start_notify(BLE_NUS_TX, self._on_notify)
+
+    def _on_notify(self, _sender, data: bytearray) -> None:
+        self._buf += bytes(data)
+        while b"\n" in self._buf:
+            raw, self._buf = self._buf.split(b"\n", 1)
+            text = raw.decode("utf-8", errors="ignore").strip()
+            if text:
+                self._lines.put(text)
+
+    async def _write(self, payload: bytes) -> None:
+        chunk = max(20, (getattr(self._client, "mtu_size", 23) or 23) - 3)
+        for i in range(0, len(payload), chunk):
+            await self._client.write_gatt_char(BLE_NUS_RX, payload[i : i + chunk], response=True)
+
+    def rpc(self, line: str) -> str:
+        import queue
+
+        while not self._lines.empty():
+            self._lines.get_nowait()
+        self._run(self._write((line + "\n").encode("utf-8")), timeout=self._timeout + 10.0)
+        deadline = time.monotonic() + self._timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("No JSON reply from pendant over BLE (is the Launcher running?)")
+            try:
+                raw = self._lines.get(timeout=remaining)
+            except queue.Empty:
+                continue
+            if raw.startswith("{") and raw.endswith("}"):
+                return raw
+
+    def close(self) -> None:
+        try:
+            if self._client is not None:
+                self._run(self._client.disconnect(), timeout=10.0)
+        finally:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=5.0)
+
+
 def _open_line_transport(port: str, baud: int):
-    """Return a context manager yielding `send_line(request_json) -> response_json`."""
+    """Return a context manager yielding `send_line(request_json) -> response_json`.
+
+    `port` is a serial port (`/dev/ttyACM0`, `COM5`), `tcp://host:port` (emulator)
+    or `ble` / `ble:<NevoFlux-XXXX or address>` (Bluetooth LE).
+    """
     import contextlib
 
     @contextlib.contextmanager
     def _ctx():
+        if port == "ble" or port.startswith("ble:"):
+            client = _BleLineClient(port[4:] if port.startswith("ble:") else "")
+            try:
+                yield client.rpc
+            finally:
+                client.close()
+            return
+
         if port.startswith(("tcp://", "socket://")):
             host, port_str = port.split("://", 1)[1].rsplit(":", 1)
             with socket.create_connection((host, int(port_str)), timeout=5.0) as sock:
@@ -470,7 +552,7 @@ def _main_wifi_only(args: argparse.Namespace) -> int:
         print("[错误] --wifi-only 需要 --ssid", file=sys.stderr)
         return 2
     if not args.port:
-        print("[错误] --wifi-only 需要 --port (例如 /dev/ttyACM0 或 COM5)", file=sys.stderr)
+        print("[错误] --wifi-only 需要 --port (例如 /dev/ttyACM0、COM5 或 ble)", file=sys.stderr)
         return 2
     print(f"[1/2] 正在连接 {args.port}，请在吊坠屏幕提示后 15 秒内单击 BOOT 键确认...")
     with _open_line_transport(args.port, args.baud) as rpc:

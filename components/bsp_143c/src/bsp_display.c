@@ -72,6 +72,9 @@ static lv_obj_t *s_lbl_body;
 /* Launcher */
 static lv_obj_t *s_btn_muse;
 static lv_obj_t *s_btn_nevo;
+static lv_obj_t *s_btn_ble;
+static int s_ble_btn_state = -1; /* -1 hidden, 0 off, 1 on (persists across screen rebuilds) */
+static int s_ble_btn_applied = -2;
 /* NevoFlux / status */
 static lv_obj_t *s_lbl_mode;
 static lv_obj_t *s_lbl_flags;
@@ -120,10 +123,11 @@ static bool touch_read_point(uint16_t *x, uint16_t *y)
     if (px >= BSP_LCD_H_RES || py >= BSP_LCD_V_RES) {
         return false;
     }
-    /* With MADCTL 0xC0 the CST820 raw coordinates already match the panel
-     * (same as the official Waveshare demo). */
-    *x = px;
-    *y = py;
+    /* The panel runs with MADCTL 0xC0 (rotated 180 deg), so the CST820 raw
+     * coordinates are rotated too: map them as the official Waveshare demo
+     * does (my_lvgl_indev_cb: LCD_WIDTH - x, LCD_HEIGHT - y). */
+    *x = (uint16_t)(BSP_LCD_H_RES - 1 - px);
+    *y = (uint16_t)(BSP_LCD_V_RES - 1 - py);
     return true;
 }
 
@@ -271,7 +275,8 @@ static void build_screen(ui_screen_t which)
     lv_obj_set_style_bg_color(scr, lv_color_hex(UI_COLOR_BG), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-    s_btn_muse = s_btn_nevo = s_lbl_mode = s_lbl_flags = NULL;
+    s_btn_muse = s_btn_nevo = s_btn_ble = s_lbl_mode = s_lbl_flags = NULL;
+    s_ble_btn_applied = -2;
 
     s_lbl_title = make_label(scr, &nf_font_32, UI_COLOR_FG, 0);
     lv_obj_align(s_lbl_title, LV_ALIGN_TOP_MID, 0, 62);
@@ -285,10 +290,15 @@ static void build_screen(ui_screen_t which)
         s_btn_nevo = make_button(scr, "NevoFlux", 160, 72, BSP_UI_TOUCH_BOOT_NEVO);
         lv_obj_align(s_btn_nevo, LV_ALIGN_CENTER, 88, 0);
         s_lbl_body = make_label(scr, &nf_font_20, UI_COLOR_FG, 300);
-        lv_obj_align(s_lbl_body, LV_ALIGN_CENTER, 0, 100);
+        lv_obj_align(s_lbl_body, LV_ALIGN_CENTER, 0, 86);
+        s_btn_ble = make_button(scr, "开启蓝牙配网", 190, 50, BSP_UI_TOUCH_TOGGLE_BLE);
+        lv_obj_align(s_btn_ble, LV_ALIGN_BOTTOM_MID, 0, -40);
     } else if (which == UI_SCREEN_NEVOFLUX) {
         set_text_if_changed(s_lbl_title, "NevoFlux");
-        s_lbl_flags = make_label(scr, &nf_font_20, UI_COLOR_DIM, 300);
+        /* Single line: wrapping made the label jump between 1 and 2 lines (e.g. 99% -> 100%).
+         * 400px fits the 466px circle's chord at y=138 (~424px). */
+        s_lbl_flags = make_label(scr, &nf_font_20, UI_COLOR_DIM, 400);
+        lv_label_set_long_mode(s_lbl_flags, LV_LABEL_LONG_DOT);
         lv_obj_align(s_lbl_flags, LV_ALIGN_TOP_MID, 0, 138);
         s_lbl_mode = make_label(scr, &nf_font_32, UI_COLOR_ACCENT, 0);
         lv_obj_align(s_lbl_mode, LV_ALIGN_CENTER, 0, -30);
@@ -392,6 +402,16 @@ void bsp_display_set_net_info(const char *net_line)
 #endif
 }
 
+void bsp_display_set_ble_button(bool available, bool on)
+{
+#if defined(ESP_PLATFORM)
+    s_ble_btn_state = available ? (on ? 1 : 0) : -1; /* applied on the next render_launcher() */
+#else
+    (void)available;
+    (void)on;
+#endif
+}
+
 void bsp_display_render_nevoflux(const bsp_ui_status_t *status)
 {
     if (!status) {
@@ -434,6 +454,18 @@ void bsp_display_render_launcher(int highlighted_system,
     snprintf(body, sizeof(body), "%s\n%s", is_paired ? "NevoFlux 已配对" : "NevoFlux 未配对",
              prompt ? prompt : "");
     set_text_if_changed(s_lbl_body, body);
+    if (s_btn_ble && s_ble_btn_applied != s_ble_btn_state) {
+        if (s_ble_btn_state < 0) {
+            lv_obj_add_flag(s_btn_ble, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(s_btn_ble, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(lv_obj_get_child(s_btn_ble, 0),
+                              s_ble_btn_state ? "关闭蓝牙配网" : "开启蓝牙配网");
+            lv_obj_set_style_border_color(s_btn_ble,
+                lv_color_hex(s_ble_btn_state ? UI_COLOR_ACCENT : UI_COLOR_CARD), 0);
+        }
+        s_ble_btn_applied = s_ble_btn_state;
+    }
     lvgl_port_unlock();
 #else
     (void)highlighted_system;
