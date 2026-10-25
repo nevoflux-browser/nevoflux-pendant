@@ -38,13 +38,16 @@ bool prov_hex_to_bytes(const char *hex, size_t hex_len, uint8_t *out_bytes, size
     return true;
 }
 
-static bool is_valid_hex_str(const char *s, size_t expected_len)
+static bool is_valid_channel_id(const char *s)
 {
-    if (!s || strlen(s) != expected_len) {
+    size_t len = s ? strlen(s) : 0U;
+    if (len == 0U || len > PROV_CHANNEL_ID_MAX_LEN) {
         return false;
     }
-    for (size_t i = 0U; i < expected_len; ++i) {
-        if (hex_nibble(s[i]) < 0) {
+    for (size_t i = 0U; i < len; ++i) {
+        char c = s[i];
+        bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-';
+        if (!ok) {
             return false;
         }
     }
@@ -454,11 +457,11 @@ int prov_rpc_handle_line(prov_rpc_ctx_t *ctx,
         if (!json_extract_str(json_line, "account_token", cred.account_token, sizeof(cred.account_token)) ||
             cred.account_token[0] == '\0' ||
             !json_extract_str(json_line, "control_channel_id", cred.control_channel_id, sizeof(cred.control_channel_id)) ||
-            !is_valid_hex_str(cred.control_channel_id, PROV_CHANNEL_ID_HEX_LEN) ||
+            !is_valid_channel_id(cred.control_channel_id) ||
             !json_extract_str(json_line, "control_key_hex", ctrl_key_hex, sizeof(ctrl_key_hex)) ||
             !prov_hex_to_bytes(ctrl_key_hex, strlen(ctrl_key_hex), cred.control_key, PROV_CHANNEL_KEY_BYTES) ||
             !json_extract_str(json_line, "data_channel_id", cred.data_channel_id, sizeof(cred.data_channel_id)) ||
-            !is_valid_hex_str(cred.data_channel_id, PROV_CHANNEL_ID_HEX_LEN) ||
+            !is_valid_channel_id(cred.data_channel_id) ||
             !json_extract_str(json_line, "data_key_hex", data_key_hex, sizeof(data_key_hex)) ||
             !prov_hex_to_bytes(data_key_hex, strlen(data_key_hex), cred.data_key, PROV_CHANNEL_KEY_BYTES)) {
             return snprintf(resp_buf, resp_cap,

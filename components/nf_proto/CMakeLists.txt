@@ -5,6 +5,7 @@ idf_component_register(
         "src/wav_header.c"
         "src/wire_seq.c"
         "src/nf_crypto.c"
+        "src/nf_codec.c"
     INCLUDE_DIRS
         "include"
     REQUIRES

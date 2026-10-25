@@ -193,6 +193,45 @@ bool nf_channel_decrypt(const uint8_t key[NF_AES_KEY_SIZE],
                         size_t out_cap,
                         size_t *out_pt_len);
 
+/* =========================================================================
+ * 6. Small codecs: base64, JSON string escaping, PCM resampling
+ * ========================================================================= */
+
+/** Encoded length without the NUL terminator. */
+size_t nf_b64_encoded_len(size_t raw_len);
+
+/** Standard base64 with padding. Returns chars written (excl. NUL), 0 on error. */
+size_t nf_b64_encode(const uint8_t *in, size_t in_len, char *out, size_t out_cap);
+
+/**
+ * Decode standard or URL-safe base64 (padding optional). Returns bytes written;
+ * `*out_ok` is false on an invalid character.
+ */
+size_t nf_b64_decode(const char *in, size_t in_len, uint8_t *out, size_t out_cap, bool *out_ok);
+
+/** Escape `in` for a JSON string body (no quotes added). Truncates to fit. */
+size_t nf_json_escape(const char *in, char *out, size_t out_cap);
+
+typedef struct {
+    uint32_t in_rate;
+    uint32_t out_rate;
+    uint32_t phase;
+    int32_t  prev;
+    int32_t  x0;
+    int32_t  x1;
+    bool     primed;
+} nf_resampler_t;
+
+/** Mono PCM16 rate converter (e.g. Kokoro's 24 kHz -> the 16 kHz the mic runs at). */
+void nf_resampler_init(nf_resampler_t *rs, uint32_t in_rate, uint32_t out_rate);
+
+/** Feed `in_samples`; streaming-safe (state carries across calls). Returns samples written. */
+size_t nf_resample(nf_resampler_t *rs,
+                   const int16_t *in,
+                   size_t in_samples,
+                   int16_t *out,
+                   size_t out_cap);
+
 #ifdef __cplusplus
 }
 #endif

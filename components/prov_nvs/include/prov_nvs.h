@@ -15,7 +15,8 @@ extern "C" {
 
 #define PROV_CONFIRM_TIMEOUT_MS     15000ULL
 
-#define PROV_CHANNEL_ID_HEX_LEN     32U
+/* nevoflux-agent mints channel ids as UUIDs (36 chars); allow any [0-9A-Za-z-] id up to 64 */
+#define PROV_CHANNEL_ID_MAX_LEN     64U
 #define PROV_CHANNEL_KEY_BYTES      32U
 
 typedef enum {
@@ -33,9 +34,9 @@ typedef struct {
 typedef struct {
     char    relay_url[128];
     char    account_token[256];
-    char    control_channel_id[PROV_CHANNEL_ID_HEX_LEN + 1];
+    char    control_channel_id[PROV_CHANNEL_ID_MAX_LEN + 1];
     uint8_t control_key[PROV_CHANNEL_KEY_BYTES];
-    char    data_channel_id[PROV_CHANNEL_ID_HEX_LEN + 1];
+    char    data_channel_id[PROV_CHANNEL_ID_MAX_LEN + 1];
     uint8_t data_key[PROV_CHANNEL_KEY_BYTES];
     bool    is_paired;
 } nf_credentials_t;

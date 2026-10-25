@@ -86,10 +86,16 @@ void sim_muse_complete_oauth(void)
              "OAuth 2.0 (RFC 8628) 授权成功！长效凭证已自动存入 NVS (muse_cfg)。\n按住右侧 BOOT 键即可与 Muse 官方语音助手对话。");
 }
 
-static void on_sim_send_data_json(const char *wire_json, void *user_ctx)
+static void on_sim_send_data_json(const char *frame_json, void *user_ctx)
 {
     (void)user_ctx;
-    snprintf(g_sim.last_tx_json, sizeof(g_sim.last_tx_json), "%s", wire_json);
+    size_t len = strlen(frame_json);
+    if (len < sizeof(g_sim.last_tx_json)) {
+        memcpy(g_sim.last_tx_json, frame_json, len + 1U);
+    } else {
+        /* a speech_chunk carries ~8.5 KB of base64: report its size, keep the JSON valid */
+        snprintf(g_sim.last_tx_json, sizeof(g_sim.last_tx_json), "{\"kind\":\"speech_chunk\",\"bytes\":%zu}", len);
+    }
     g_sim.tx_json_count++;
 }
 
@@ -154,7 +160,9 @@ void sim_init(int initial_partition)
     g_sim.now_ms = 1000ULL;
 
     prov_rpc_init(&g_sim.prov_rpc, on_sim_prov_prompt, on_sim_prov_applied, NULL);
-    nf_app_init(&g_sim.nevo_app, 0x20261017U, on_sim_send_data_json, NULL);
+    const nf_app_io_t nevo_io = {.send_frame = on_sim_send_data_json, .stop_playback = NULL, .ctx = NULL};
+    nf_app_init(&g_sim.nevo_app, 0x20261017U, &nevo_io);
+    nf_app_set_link(&g_sim.nevo_app, true);
     muse_device_init(&g_sim.muse_app);
     /* Start RFC 8628 Device Authorization Grant when Muse has no stored token in NVS */
     if (g_sim.muse_app.auth_state == MUSE_AUTH_UNPAIRED) {
@@ -186,7 +194,7 @@ void sim_step_ms(uint32_t delta_ms)
         if (g_sim.nevo_app.state == NF_APP_STATE_LISTENING) {
             snprintf(g_sim.nevo_app.screen_transcript,
                      sizeof(g_sim.nevo_app.screen_transcript),
-                     "正在聆听…（16kHz PCM16 → NFA1 24B 帧上行中）");
+                     "正在聆听…（16kHz PCM16 → 每 200ms 一条 speech_chunk 上行）");
         }
     } else if (kev != BSP_KEY_EVENT_NONE && g_sim.active_partition == SIM_PARTITION_MUSE &&
                g_sim.muse_app.auth_state == MUSE_AUTH_AUTHORIZED) {
@@ -323,13 +331,13 @@ void sim_touch_xy(int x, int y)
 void sim_inject_speech_partial(const char *text)
 {
     g_sim.active_partition = SIM_PARTITION_NEVOFLUX;
-    nf_app_on_speech_partial(&g_sim.nevo_app, g_sim.nevo_app.current_utterance_id, text);
+    nf_app_on_speech_partial(&g_sim.nevo_app, g_sim.nevo_app.utterance_id, text);
 }
 
 void sim_inject_speech_final(const char *text, bool accepted)
 {
     g_sim.active_partition = SIM_PARTITION_NEVOFLUX;
-    nf_app_on_speech_final(&g_sim.nevo_app, g_sim.nevo_app.current_utterance_id, text, accepted);
+    nf_app_on_speech_final(&g_sim.nevo_app, g_sim.nevo_app.utterance_id, text, accepted);
 }
 
 void sim_inject_tts_asset(const char *reply_text, uint32_t sample_rate_hz)
@@ -341,32 +349,11 @@ void sim_inject_tts_asset(const char *reply_text, uint32_t sample_rate_hz)
                  "%s",
                  reply_text);
     }
-    nf_app_on_asset_offer(&g_sim.nevo_app, "tts_kokoro_turn_01", 48000ULL, true);
-
-    /* Simulate first NFM1 chunk with WAV header to trigger ES8311 sample rate switch */
-    uint8_t wav_hdr[64] = {
-        'R', 'I', 'F', 'F', 0x24, 0x80, 0x00, 0x00, 'W', 'A', 'V', 'E',
-        'f', 'm', 't', ' ', 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
-        (uint8_t)(sample_rate_hz & 0xFFU),
-        (uint8_t)((sample_rate_hz >> 8) & 0xFFU),
-        (uint8_t)((sample_rate_hz >> 16) & 0xFFU),
-        (uint8_t)((sample_rate_hz >> 24) & 0xFFU),
-        0x80, 0xBB, 0x00, 0x00, 0x02, 0x00, 0x10, 0x00,
-        'd', 'a', 't', 'a', 0x00, 0x80, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00
-    };
-    nfm1_frame_t frame = {
-        .has_seq = false,
-        .id = "tts_kokoro_turn_01",
-        .offset = 0ULL,
-        .flags = NFM1_FLAG_NO_SEQ,
-        .eof = false,
-        .payload = wav_hdr,
-        .payload_len = 48U,
-    };
-    const uint8_t *pcm_ptr = NULL;
-    size_t pcm_len = 0U;
-    (void)nf_asset_stream_on_nfm1(&g_sim.nevo_app.downlink_stream, &frame, &pcm_ptr, &pcm_len);
+    /* The head's answer: text streams in, then voice_audio sentences (resampled to 16 kHz) */
+    (void)sample_rate_hz;
+    nf_app_on_stream_delta(&g_sim.nevo_app, "");
+    (void)nf_app_on_voice_audio(&g_sim.nevo_app, "vt_sim_turn_01", 0U);
+    nf_app_on_voice_done(&g_sim.nevo_app, "vt_sim_turn_01");
 }
 
 int sim_inject_prov_line(const char *json_line, char *out_resp, size_t resp_cap)
@@ -749,10 +736,10 @@ static void render_nevoflux_screen(cairo_t *cr)
     char telemetry[128];
     snprintf(telemetry,
              sizeof(telemetry),
-             "utt:%llx | chunk:%u | 500ms队列:%zu/25",
-             (unsigned long long)g_sim.nevo_app.current_utterance_id,
-             (unsigned)g_sim.nevo_app.current_chunk_seq,
-             g_sim.nevo_app.uplink_q.count);
+             "utt:%s | chunk:%u | 待发帧:%zu/10",
+                  g_sim.nevo_app.utterance_id,
+             (unsigned)g_sim.nevo_app.chunk_seq,
+             g_sim.nevo_app.chunk_len / NF_PCM_BYTES_PER_FRAME);
     draw_pango_text(cr, telemetry, "Monospace 10", 52, 316, 362, PANGO_ALIGN_CENTER, 0.44, 0.54, 0.66);
 
     /* 4. Bottom Touch Action Buttons inside Circular Safe Zone */
@@ -859,7 +846,7 @@ int sim_get_state_json(char *out_buf, size_t out_cap)
                     "\"app_state\":\"%s\","
                     "\"muse_user_code\":\"%s\","
                     "\"sample_rate\":%u,"
-                    "\"utterance_id\":\"%llu\","
+                    "\"utterance_id\":\"%s\","
                     "\"chunk_seq\":%u,"
                     "\"uplink_queue\":%zu,"
                     "\"tx_count\":%u,"
@@ -869,9 +856,9 @@ int sim_get_state_json(char *out_buf, size_t out_cap)
                     app_st,
                     g_sim.muse_app.user_code,
                     (unsigned)bsp_audio_get_sample_rate(),
-                    (unsigned long long)g_sim.nevo_app.current_utterance_id,
-                    (unsigned)g_sim.nevo_app.current_chunk_seq,
-                    g_sim.nevo_app.uplink_q.count,
+                    g_sim.nevo_app.utterance_id,
+                    (unsigned)g_sim.nevo_app.chunk_seq,
+                    g_sim.nevo_app.chunk_len / NF_PCM_BYTES_PER_FRAME,
                     (unsigned)g_sim.tx_json_count,
                     g_sim.last_tx_json[0] ? g_sim.last_tx_json : "null");
 }

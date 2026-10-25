@@ -8,6 +8,7 @@ SRCS := \
 	../src/wav_header.c \
 	../src/wire_seq.c \
 	../src/nf_crypto.c \
+	../src/nf_codec.c \
 	test_nf_proto.c
 
 TARGET := test_nf_proto.out

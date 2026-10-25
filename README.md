@@ -61,7 +61,14 @@ Built on the official [Meta Muse Gadget ESP32 SDK](https://github.com/facebookin
 4. **Browser Approval & Auto-NVS Persistence**: While the user approves in their phone/PC browser, the ESP32 polls in the background (honoring RFC 8628 `authorization_pending` and `slow_down` intervals). Once approved, the issued long-lived token is automatically saved into NVS (`muse_cfg`).
 
 ### NevoFlux Partition (`ota_1`): End-to-End Encrypted Private Daemon Pairing
-Uses `tools/provision/provision.py` to mint a dedicated 7-day device `account_token` and derive 32-byte AES-256-GCM channel keys (`Argon2id m=65536, t=3, p=4`), requiring a physical `BOOT` button press within 15 seconds on the pendant before committing to NVS (`nf_cfg`).
+Uses `tools/provision/provision.py` to mint a dedicated device `account_token` and derive the 32-byte AES-256-GCM channel keys (`Argon2id m=65536, t=3, p=4`) from the desktop's `/pair-device` link and code, requiring a physical `BOOT` button press within 15 seconds on the pendant before committing to NVS (`nf_cfg`).
+
+### Talking to the desktop: LAN first, Relay otherwise
+The pendant speaks the nevoflux-agent remote protocol (the same one the phone portal uses): a control channel (`sync` → `sessions` → `attach` the most recently updated conversation) and a data channel. Every frame is `{"k":"frame","frame":…}` sealed with AES-256-GCM (`nonce ‖ ciphertext ‖ tag`).
+
+- **Same Wi-Fi as the desktop**: the agent listens on TCP `47821` and advertises mDNS `_nevoflux._tcp` (TXT `ch` = first 8 hex of SHA-256 of each data channel id). The pendant dials `ws://<pc>:47821/?c=<channel>` directly: no Cloudflare traffic, no cost, lowest latency. The status line shows **局域网**. (Windows asks once to allow the agent through the firewall; `NEVOFLUX_LAN=0` turns it off.)
+- **Anywhere else**: `wss://relay.nevoflux.app/?c=<channel>&t=<15-min JWT>`; the status line shows **Relay**. While on the relay the pendant re-checks the LAN every 2 minutes.
+- **Voice**: hold `BOOT` and speak. 16 kHz PCM goes up as one `speech_chunk` every 200 ms (5 relay messages/s). The desktop transcribes it (`speech_final`), and the pendant sends the turn as `user_message {voice:true}`. The answer streams back as text (`stream_delta`) and as spoken sentences (`voice_audio`, a base64 WAV, resampled to 16 kHz on the pendant so the mic never stops). Press `BOOT` while it speaks to interrupt it (`voice_barge_in`). Press `PWR` to cancel.
 
 ## Quick Start
 
@@ -102,17 +109,20 @@ make emu
 
 ### 4. Provision WiFi & NevoFlux Pairing Credentials
 
-Run `/pair-device` on your NevoFlux desktop daemon to get a pairing code, then connect the pendant via USB (or `tcp://127.0.0.1:15555` when running `esp-emu`):
+Run `/pair-device` in the NevoFlux sidebar. It prints a link (`https://…/d/<control_channel_id>/pair`) and a code (`X-XXXX-XXXX-XXXX`). Keep NevoFlux running, then connect the pendant via USB (or `tcp://127.0.0.1:15555` when running `esp-emu`):
 
 ```bash
+pip install pyserial websocket-client cryptography argon2-cffi
 python3 tools/provision/provision.py \
   --port /dev/ttyACM0 \
   --ssid "<WIFI_SSID>" \
   --password "<WIFI_PASS>" \
+  --link "<LINK FROM /pair-device>" \
   --code "<PAIRING_CODE>"
 ```
 
-- The tool performs an independent **Device Authorization Grant** (minting a dedicated 7-day `account_token` for the pendant so it can be revoked independently if lost) and derives the 32-byte AES-256-GCM keys on the host using `Argon2id (m=65536, t=3, p=4)`.
+- The tool runs an independent **Device Authorization Grant** for the pendant, so its session can be revoked on its own if the pendant is lost. Sign in with the **same NevoFlux account** as the desktop.
+- It derives both channel keys with `Argon2id (m=65536, t=3, p=4)` on the PC, then asks the desktop for the data channel id over the sealed control channel. Pass `--data-channel` to skip that step.
 - When prompted on the pendant screen, **click the `BOOT` button once within 15 seconds** to confirm physical presence and commit the credentials to NVS.
 
 **Bluetooth LE** works the same way (`pip install bleak`; Windows 10/11, Linux, macOS). BLE is **off by default**: tap **开启蓝牙配网** on the Launcher screen to advertise `NevoFlux-XXXX` (shown on screen) with the Nordic UART Service for 3 minutes. It closes automatically after a successful write, on timeout, or when tapped again:
@@ -172,7 +182,7 @@ Audio (ES8311 speaker DAC + ES7210 mics) uses `espressif/esp_codec_dev` with the
 2. **Install Python 3** (tick "Add python.exe to PATH"), then:
 
    ```bat
-   pip install esptool pyserial bleak
+   pip install esptool pyserial bleak websocket-client cryptography argon2-cffi
    ```
 
 3. **Power on and find the COM port.** Connect the board over USB-C (the ESP32-S3 native USB uses the built-in Win10 driver), then **long-press `PWR` for 2–3 s** — the board has a power latch and stays off (dark screen, "USB device not recognized" / Code 43) until powered on. In Device Manager → *Ports (COM & LPT)*, note the "USB Serial Device (COMx)".

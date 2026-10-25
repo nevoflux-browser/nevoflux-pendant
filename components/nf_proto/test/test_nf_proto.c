@@ -255,8 +255,88 @@ static void test_aes_256_gcm_channel_crypto(void)
     assert(!nf_channel_decrypt(key, wire, wire_len, decrypted, sizeof(decrypted), &dec_len));
 }
 
+static void test_codecs(void)
+{
+    char enc[64];
+    uint8_t dec[64];
+    bool ok = false;
+    /* RFC 4648 vectors */
+    const char *vec[][2] = {{"", ""}, {"f", "Zg=="}, {"fo", "Zm8="}, {"foo", "Zm9v"},
+                            {"foob", "Zm9vYg=="}, {"fooba", "Zm9vYmE="}, {"foobar", "Zm9vYmFy"}};
+    for (size_t i = 0; i < sizeof(vec) / sizeof(vec[0]); ++i) {
+        size_t n = nf_b64_encode((const uint8_t *)vec[i][0], strlen(vec[i][0]), enc, sizeof(enc));
+        assert(n == strlen(vec[i][1]) && strcmp(enc, vec[i][1]) == 0);
+        size_t m = nf_b64_decode(enc, n, dec, sizeof(dec), &ok);
+        assert(ok && m == strlen(vec[i][0]) && memcmp(dec, vec[i][0], m) == 0);
+    }
+    assert(nf_b64_encode((const uint8_t *)"foo", 3, enc, 4) == 0U); /* no room for NUL */
+    (void)nf_b64_decode("Zm9*", 4, dec, sizeof(dec), &ok);
+    assert(!ok);
+
+    char esc[64];
+    nf_json_escape("a\"b\\c\n\x01", esc, sizeof(esc));
+    assert(strcmp(esc, "a\\\"b\\\\c\\n\\u0001") == 0);
+    nf_json_escape("abc\"", esc, 5); /* the escape does not fit: dropped whole */
+    assert(strcmp(esc, "abc") == 0);
+
+    /* 24k -> 16k: 2:3 ratio, streaming-safe, DC passes through unchanged */
+    static int16_t in[2400];
+    static int16_t out_whole[2000];
+    static int16_t out_parts[2000];
+    for (size_t i = 0; i < 2400; ++i) {
+        in[i] = 1000;
+    }
+    nf_resampler_t rs;
+    nf_resampler_init(&rs, 24000, 16000);
+    size_t whole = nf_resample(&rs, in, 2400, out_whole, 2000);
+    assert(whole >= 1598 && whole <= 1600);
+    for (size_t i = 4; i < whole; ++i) {
+        assert(out_whole[i] == 1000);
+    }
+    nf_resampler_init(&rs, 24000, 16000);
+    size_t parts = 0;
+    for (size_t off = 0; off < 2400; off += 7) {
+        size_t n = (2400 - off < 7) ? 2400 - off : 7;
+        parts += nf_resample(&rs, in + off, n, out_parts + parts, 2000 - parts);
+    }
+    assert(parts == whole && memcmp(out_whole, out_parts, whole * sizeof(int16_t)) == 0);
+    nf_resampler_init(&rs, 16000, 16000);
+    assert(nf_resample(&rs, in, 100, out_whole, 2000) == 100);
+    printf("[PASS] base64 / json escape / resampler\n");
+}
+
+/* nevoflux-agent crates/daemon/tests/fixtures/muse/seal.json: same bytes as the head seals */
+static void test_seal_matches_agent_vector(void)
+{
+    uint8_t key[32];
+    for (size_t i = 0; i < 32; ++i) {
+        key[i] = (uint8_t)i;
+    }
+    const uint8_t nonce[12] = {0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f};
+    const char *pt = "{\"k\":\"frame\",\"frame\":{\"d\":\"h2c\",\"n\":0,\"ch\":\"AAECAwQFBgcICQoLDA0ODw\",\"m\":null}}";
+    const char *want_hex =
+        "6465666768696a6b6c6d6e6f3339b54443cb30ec5f0f3acaf6470c8f23af6328b117d11685eb8e20c9c08764b68762fa7c3e"
+        "b96795d1421dbc038f8c5a2cc9a1622d2261b9a0c39aabc095c54cfbf922f426193fe51a812f6cf722958e05c1acfc986432ac"
+        "4f97324723";
+    uint8_t wire[256];
+    size_t n = nf_channel_encrypt(key, nonce, (const uint8_t *)pt, strlen(pt), wire, sizeof(wire));
+    assert(n == strlen(want_hex) / 2U);
+    char got[520];
+    for (size_t i = 0; i < n; ++i) {
+        snprintf(got + 2U * i, 3, "%02x", wire[i]);
+    }
+    assert(strcmp(got, want_hex) == 0);
+    uint8_t back[256];
+    size_t back_len = 0;
+    assert(nf_channel_decrypt(key, wire, n, back, sizeof(back), &back_len));
+    assert(back_len == strlen(pt) && memcmp(back, pt, back_len) == 0);
+    printf("[PASS] AES-256-GCM seal matches the nevoflux-agent vector\n");
+}
+
 int main(void)
 {
+    test_codecs();
+    test_seal_matches_agent_vector();
     test_utterance_id_generation_and_str();
     test_nfa1_encode_decode_vectors();
     test_nfm1_encode_decode();

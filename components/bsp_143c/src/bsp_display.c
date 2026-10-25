@@ -417,7 +417,8 @@ void bsp_display_render_nevoflux(const bsp_ui_status_t *status)
     }
     build_screen(UI_SCREEN_NEVOFLUX);
     char flags[96];
-    snprintf(flags, sizeof(flags), "Relay %s · 主机 %s · 电量 %u%%",
+    snprintf(flags, sizeof(flags), "%s %s · 主机 %s · 电量 %u%%",
+             status->link_label ? status->link_label : "Relay",
              status->relay_connected ? "OK" : "--",
              status->daemon_online ? "在线" : "离线",
              (unsigned)status->battery_percent);

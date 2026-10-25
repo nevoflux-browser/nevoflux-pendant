@@ -40,9 +40,9 @@ int main(void)
         "\"wifi_pass\":\"secret123\","
         "\"relay_url\":\"wss://relay.nevoflux.app\","
         "\"account_token\":\"sess_tok_independent_7d\","
-        "\"control_channel_id\":\"0123456789abcdef0123456789abcdef\","
+        "\"control_channel_id\":\"2f1c4a90-7b3e-4d1a-9c58-0e6a2b7d4f31\","
         "\"control_key_hex\":\"1111111111111111111111111111111111111111111111111111111111111111\","
-        "\"data_channel_id\":\"fedcba9876543210fedcba9876543210\","
+        "\"data_channel_id\":\"9a8b7c6d-1111-4d1a-9c58-0e6a2b7d4f31\","
         "\"data_key_hex\":\"2222222222222222222222222222222222222222222222222222222222222222\"}";
 
     /* 1. Attempting prov.write without prov.offer + BOOT confirm must be rejected */
@@ -83,7 +83,7 @@ int main(void)
     assert(prov_nvs_load_nf_cfg(&loaded_cred));
     assert(loaded_cred.is_paired);
     assert(strcmp(loaded_cred.account_token, "sess_tok_independent_7d") == 0);
-    assert(strcmp(loaded_cred.data_channel_id, "fedcba9876543210fedcba9876543210") == 0);
+    assert(strcmp(loaded_cred.data_channel_id, "9a8b7c6d-1111-4d1a-9c58-0e6a2b7d4f31") == 0);
     assert(loaded_cred.data_key[0] == 0x22U && loaded_cred.data_key[31] == 0x22U);
 
     /* 7. Verify Muse RFC 8628 credential NVS persistence (muse_cfg namespace) */

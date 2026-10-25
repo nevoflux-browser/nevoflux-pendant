@@ -1,36 +1,84 @@
 #!/usr/bin/env python3
 import json
+import os
 import unittest
 
 from provision import (
     _BleLineClient,
     DerivedPairingMaterial,
-    derive_channel_id,
+    control_channel_from_link,
+    derive_channel_key,
     derive_pairing_material,
     execute_provisioning_handshake,
+    normalize_pairing_code,
+    open_frame,
+    seal_frame,
+)
+
+FIXTURES = os.path.join(
+    os.path.dirname(__file__), "..", "..", "..", "nevoflux-agent", "crates", "daemon", "tests", "fixtures", "muse"
 )
 
 
-class TestProvisioning(unittest.TestCase):
-    def test_channel_id_and_argon2id_derivation(self) -> None:
-        code = "nevo-test-pair-2026"
-        # Use smaller memory in unit test for fast execution, then verify full 64MB KDF once
-        mat_fast = derive_pairing_material(code, memory_kib=1024, iterations=2, parallelism=4)
-        self.assertEqual(len(mat_fast.control_channel_id), 32)
-        self.assertEqual(len(mat_fast.data_channel_id), 32)
-        self.assertNotEqual(mat_fast.control_channel_id, mat_fast.data_channel_id)
-        self.assertEqual(len(mat_fast.control_key), 32)
-        self.assertEqual(len(mat_fast.data_key), 32)
-        self.assertNotEqual(mat_fast.control_key, mat_fast.data_key)
+def _fixture(name: str):
+    path = os.path.join(FIXTURES, name)
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
 
-        # Verify production parameters (m=65536, t=3, p=4) determinism
-        mat_prod1 = derive_pairing_material(code)
-        mat_prod2 = derive_pairing_material(code)
-        self.assertEqual(mat_prod1, mat_prod2)
-        self.assertEqual(len(mat_prod1.data_key_hex), 64)
+
+class TestProvisioning(unittest.TestCase):
+    def test_pairing_code_normalization_matches_agent_fixture(self) -> None:
+        fx = _fixture("pairing_code.json") or {
+            "valid": [{"input": "x abcd efgh jkmn", "canonical": "X-ABCD-EFGH-JKMN"},
+                      {"input": "X-ILOI-OLIO-1234", "canonical": "X-1101-0110-1234"}],
+            "invalid": ["X-ABCD-EFGH-JKM", "X-ABCU-EFGH-JKMN"],
+        }
+        for case in fx["valid"]:
+            self.assertEqual(normalize_pairing_code(case["input"]), case["canonical"], case["input"])
+        for bad in fx["invalid"]:
+            with self.assertRaises(ValueError):
+                normalize_pairing_code(bad)
+
+    def test_link_names_the_control_channel(self) -> None:
+        cid = "2f1c4a90-7b3e-4d1a-9c58-0e6a2b7d4f31"
+        self.assertEqual(control_channel_from_link(f"https://portal.nevoflux.app/d/{cid}/pair"), cid)
+        with self.assertRaises(ValueError):
+            control_channel_from_link("https://portal.nevoflux.app/settings")
+
+    def test_channel_key_matches_agent_kdf_vectors(self) -> None:
+        fx = _fixture("kdf.json")
+        if fx is None:
+            self.skipTest("nevoflux-agent fixtures not checked out next to this repo")
+        for v in fx["vectors"]:
+            self.assertEqual(derive_channel_key(v["code"], v["channel_id"]).hex(), v["key_hex"])
+
+    def test_seal_matches_agent_vector(self) -> None:
+        try:
+            import cryptography  # type: ignore  # noqa: F401
+        except ImportError:
+            self.skipTest("cryptography not installed")
+        fx = _fixture("seal.json")
+        if fx is None:
+            self.skipTest("nevoflux-agent fixtures not checked out next to this repo")
+        key = bytes.fromhex(fx["key_hex"])
+        plain = json.dumps(fx["plaintext"], separators=(",", ":")).encode()
+        sealed = seal_frame(key, plain, bytes.fromhex(fx["nonce_hex"]))
+        self.assertEqual(sealed.hex(), fx["sealed_hex"])
+        self.assertEqual(open_frame(key, sealed), plain)
+        self.assertIsNone(open_frame(bytes(32), sealed))
+
+    def test_material_for_both_channels(self) -> None:
+        mat = derive_pairing_material("X-ABCD-EFGH-JKMN", "ctl-uuid", "data-uuid",
+                                      memory_kib=1024, iterations=1, parallelism=4)
+        self.assertEqual(mat.control_channel_id, "ctl-uuid")
+        self.assertEqual(len(mat.control_key), 32)
+        self.assertNotEqual(mat.control_key, mat.data_key)
 
     def test_handshake_with_boot_confirmation(self) -> None:
-        mat = derive_pairing_material("code-123", memory_kib=1024, iterations=1, parallelism=4)
+        mat = derive_pairing_material("X-ABCD-EFGH-JKMN", "2f1c4a90-7b3e-4d1a-9c58-0e6a2b7d4f31",
+                                      "9a8b7c6d-7b3e-4d1a-9c58-0e6a2b7d4f31", memory_kib=1024, iterations=1, parallelism=4)
         state = {"polls": 0, "written": None}
 
         def mock_transport(line: str) -> str:

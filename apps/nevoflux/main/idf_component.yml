@@ -1,0 +1,6 @@
+dependencies:
+  idf: ">=5.3"
+  # Relay / LAN WebSocket transport to the nevoflux-agent head
+  espressif/esp_websocket_client: "^1.4.0"
+  # Finds the head on the LAN (`_nevoflux._tcp`)
+  espressif/mdns: "^1.4.0"

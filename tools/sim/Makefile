@@ -16,13 +16,13 @@ FW_SRCS := \
 	../../components/nf_proto/src/wav_header.c \
 	../../components/nf_proto/src/wire_seq.c \
 	../../components/nf_proto/src/nf_crypto.c \
+	../../components/nf_proto/src/nf_codec.c \
 	../../components/prov_nvs/src/prov_nvs.c \
 	../../components/bsp_143c/src/bsp_audio.c \
 	../../components/bsp_143c/src/bsp_display.c \
 	../../components/bsp_143c/src/bsp_power_key.c \
 	../../apps/nevoflux/main/token_mgr.c \
 	../../apps/nevoflux/main/relay_ws.c \
-	../../apps/nevoflux/main/audio_in.c \
 	../../apps/nevoflux/main/audio_out.c \
 	../../apps/nevoflux/main/app_state.c \
 	../../apps/muse/main/muse_oauth_device.c

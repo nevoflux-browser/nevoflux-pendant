@@ -3,17 +3,20 @@
 NevoFlux Voice Pendant Provisioning Tool (USB Serial / BLE Gateway)
 
 Responsibilities:
-1. Run an independent OAuth2 / Better-Auth Device Authorization Grant to mint a
-   dedicated 7-day `account_token` for this pendant (with custom User-Agent
-   `nevoflux-pendant/0.1` so Cloudflare 1010 does not return 403).
-2. Derive dual channel IDs and 32-byte AES-256-GCM keys on the PC from the
-   `/pair-device` code, matching `nevoflux-portal/src/lib/chat/crypto.ts`:
-     - control_channel_id = Hex(HMAC-SHA256(code, "nevoflux-channel-v1")[0..16])
-     - control_key        = Argon2id(password=code, salt=f"{code}|{control_channel_id}", m=65536, t=3, p=4)
-     - data_channel_id    = Hex(HMAC-SHA256(code, "nevoflux-data-channel-v1")[0..16])
-     - data_key           = Argon2id(password=code, salt=f"{code}|{data_channel_id}",     m=65536, t=3, p=4)
-3. Perform the physical-presence handshake over USB Serial (`prov.offer` -> wait
-   for user to click BOOT button on pendant within 15s -> `prov.write`).
+1. Run an independent Device Authorization Grant to mint a dedicated account
+   token for this pendant (custom User-Agent `nevoflux-pendant/0.1`, or
+   Cloudflare 1010 answers 403).
+2. Turn the desktop `/pair-device` output (link `.../d/<control_channel_id>/pair`
+   + code `X-XXXX-XXXX-XXXX`) into what the pendant stores, matching
+   nevoflux-agent `remote/pairing.rs` and `docs/muse-client-protocol.md`:
+     - the code is normalized (fixtures/muse/pairing_code.json)
+     - channel key = Argon2id(password=code, salt=f"{code}|{channel_id}", m=65536, t=3, p=4)
+     - the data channel id is not in the link: it is asked of the head over the
+       sealed control channel (`sync` -> `sessions.dataChannelId`), exactly as
+       the phone portal learns it.
+   ESP32-S3 never runs Argon2id (64 MiB).
+3. Perform the physical-presence handshake over USB Serial / BLE (`prov.offer`
+   -> BOOT click on the pendant within 15s -> `prov.write`).
 """
 
 from __future__ import annotations
@@ -21,8 +24,6 @@ from __future__ import annotations
 import argparse
 import ctypes
 import ctypes.util
-import hashlib
-import hmac
 import json
 import socket
 import sys
@@ -58,16 +59,26 @@ class DerivedPairingMaterial:
         return self.data_key.hex()
 
 
-def derive_channel_id(pairing_code: str, domain_label: str) -> str:
-    """
-    Matches `Hex(HMAC-SHA256(code, domain_label)[0..16])` (32 lowercase hex chars).
-    """
-    mac = hmac.new(
-        key=pairing_code.encode("utf-8"),
-        msg=domain_label.encode("utf-8"),
-        digestmod=hashlib.sha256,
-    ).digest()
-    return mac[:16].hex()
+PAIRING_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def normalize_pairing_code(raw: str) -> str:
+    """Canonical `X-XXXX-XXXX-XXXX` form of a pairing code (agent fixtures/muse/pairing_code.json)."""
+    chars = [c for c in raw if c.isascii() and c.isalnum()]
+    text = "".join(chars).upper().translate(str.maketrans({"I": "1", "L": "1", "O": "0"}))
+    if len(text) != 13 or any(c not in PAIRING_ALPHABET for c in text):
+        raise ValueError(f"not a pairing code: {raw!r} (expected X-XXXX-XXXX-XXXX)")
+    return f"{text[0]}-{text[1:5]}-{text[5:9]}-{text[9:13]}"
+
+
+def control_channel_from_link(link: str) -> str:
+    """The control channel id in a `/pair-device` link (`https://portal.../d/<id>/pair`)."""
+    import re
+
+    m = re.search(r"/d/([0-9A-Za-z-]{8,64})(?:/|$)", link.strip())
+    if not m:
+        raise ValueError(f"not a /pair-device link: {link!r}")
+    return m.group(1)
 
 
 def argon2id_raw(
@@ -135,39 +146,123 @@ def argon2id_raw(
     return out_buf.raw
 
 
+def derive_channel_key(
+    code: str,
+    channel_id: str,
+    memory_kib: int = KDF_MEMORY_KIB,
+    iterations: int = KDF_ITERATIONS,
+    parallelism: int = KDF_PARALLELISM,
+) -> bytes:
+    """Argon2id(code, f"{code}|{channel_id}") — nevoflux-agent remote/crypto.rs `derive_channel_key`."""
+    return argon2id_raw(
+        code.encode("utf-8"), f"{code}|{channel_id}".encode("utf-8"), memory_kib, iterations, parallelism
+    )
+
+
 def derive_pairing_material(
     pairing_code: str,
+    control_channel_id: str,
+    data_channel_id: str,
     memory_kib: int = KDF_MEMORY_KIB,
     iterations: int = KDF_ITERATIONS,
     parallelism: int = KDF_PARALLELISM,
 ) -> DerivedPairingMaterial:
-    """
-    Derive both control and data channel IDs and 32-byte keys from `pairing_code`.
-    """
-    if not pairing_code:
-        raise ValueError("pairing_code must not be empty")
-
-    ctrl_cid = derive_channel_id(pairing_code, "nevoflux-channel-v1")
-    data_cid = derive_channel_id(pairing_code, "nevoflux-data-channel-v1")
-
-    pwd_bytes = pairing_code.encode("utf-8")
-    ctrl_salt = f"{pairing_code}|{ctrl_cid}".encode("utf-8")
-    data_salt = f"{pairing_code}|{data_cid}".encode("utf-8")
-
-    ctrl_key = argon2id_raw(pwd_bytes, ctrl_salt, memory_kib, iterations, parallelism)
-    data_key = argon2id_raw(pwd_bytes, data_salt, memory_kib, iterations, parallelism)
-
+    """Both channel keys for a pairing whose two channel ids are known."""
+    if not control_channel_id or not data_channel_id:
+        raise ValueError("both channel ids are required")
+    code = normalize_pairing_code(pairing_code)
     return DerivedPairingMaterial(
-        control_channel_id=ctrl_cid,
-        control_key=ctrl_key,
-        data_channel_id=data_cid,
-        data_key=data_key,
+        control_channel_id=control_channel_id,
+        control_key=derive_channel_key(code, control_channel_id, memory_kib, iterations, parallelism),
+        data_channel_id=data_channel_id,
+        data_key=derive_channel_key(code, data_channel_id, memory_kib, iterations, parallelism),
     )
+
+
+def seal_frame(key: bytes, plaintext: bytes, nonce: Optional[bytes] = None) -> bytes:
+    """nonce(12) || AES-256-GCM(ciphertext || tag), no AAD — remote/channel_codec.rs."""
+    import os
+
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # type: ignore
+
+    n = nonce if nonce is not None else os.urandom(12)
+    return n + AESGCM(key).encrypt(n, plaintext, None)
+
+
+def open_frame(key: bytes, wire: bytes) -> Optional[bytes]:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # type: ignore
+
+    if len(wire) < 28:
+        return None
+    try:
+        return AESGCM(key).decrypt(wire[:12], wire[12:], None)
+    except Exception:  # noqa: BLE001 - a frame that does not open is just dropped
+        return None
+
+
+def mint_relay_jwt(account_token: str, base_url: str = DEFAULT_BASE_URL) -> str:
+    """A 15-minute relay JWT (`set-auth-jwt` header, or `{token}` body)."""
+    req = urllib.request.Request(
+        f"{base_url.rstrip('/')}/api/auth/token",
+        headers={"Authorization": f"Bearer {account_token}", "User-Agent": USER_AGENT, "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        jwt = resp.headers.get("set-auth-jwt")
+        body = resp.read().decode("utf-8", errors="ignore")
+    if jwt:
+        return jwt
+    token = json.loads(body or "{}").get("token")
+    if not token:
+        raise RuntimeError("the account did not mint a relay token (signed in to the same account as the desktop?)")
+    return str(token)
+
+
+def fetch_data_channel_id(
+    control_channel_id: str,
+    control_key: bytes,
+    jwt: str,
+    relay_url: str = DEFAULT_RELAY_URL,
+    timeout_sec: float = 25.0,
+) -> str:
+    """Ask the head for this pairing's data channel id over the sealed control channel."""
+    try:
+        import websocket  # type: ignore  # pip install websocket-client
+    except ImportError as exc:  # pragma: no cover - depends on host packages
+        raise RuntimeError("需要 websocket-client：pip install websocket-client cryptography") from exc
+
+    url = f"{relay_url.rstrip('/')}/?c={control_channel_id}&t={jwt}"
+    ws = websocket.create_connection(url, timeout=10, header=[f"User-Agent: {USER_AGENT}"])
+    try:
+        sync = json.dumps({"k": "frame", "frame": {"kind": "sync"}}, separators=(",", ":")).encode()
+        ws.send_binary(seal_frame(control_key, sync))
+        deadline = time.monotonic() + timeout_sec
+        warned = False
+        while time.monotonic() < deadline:
+            ws.settimeout(max(0.5, deadline - time.monotonic()))
+            try:
+                opcode, data = ws.recv_data()
+            except websocket.WebSocketTimeoutException:
+                break
+            if opcode == websocket.ABNF.OPCODE_TEXT:
+                text = data.decode("utf-8", errors="ignore")
+                if '"peers"' in text and '"n":0' in text and not warned:
+                    print("    电脑端 NevoFlux 尚未连上 Relay，等待中…")
+                    warned = True
+                continue
+            plain = open_frame(control_key, data)
+            if plain is None:
+                raise RuntimeError("控制通道的回复解不开：配对码与链接不是同一次 /pair-device 生成的？")
+            frame = json.loads(plain).get("frame") or {}
+            if frame.get("kind") == "sessions" and frame.get("dataChannelId"):
+                return str(frame["dataChannelId"])
+    finally:
+        ws.close()
+    raise TimeoutError("电脑端没有回复会话列表（NevoFlux 是否在运行并已登录？）")
 
 
 def request_independent_device_token(
     base_url: str = DEFAULT_BASE_URL,
-    client_id: str = "nevoflux-pendant",
+    client_id: str = "nevoflux-daemon",
     timeout_sec: int = 180,
 ) -> str:
     """
@@ -179,7 +274,7 @@ def request_independent_device_token(
 
     req = urllib.request.Request(
         code_url,
-        data=json.dumps({"client_id": client_id, "scope": "relay:token"}).encode("utf-8"),
+        data=json.dumps({"client_id": client_id, "scope": "openid profile email"}).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
             "User-Agent": USER_AGENT,
@@ -323,6 +418,12 @@ def _offer_and_wait_boot_confirm(
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="NevoFlux Voice Pendant Provisioning Tool")
     parser.add_argument("--code", help="Pairing code from desktop /pair-device (not needed with --wifi-only)")
+    parser.add_argument("--link", help="The link /pair-device printed (https://.../d/<control_channel_id>/pair)")
+    parser.add_argument("--control-channel", help="Control channel id (instead of --link)")
+    parser.add_argument(
+        "--data-channel", help="Data channel id, if known (otherwise asked of the head over the control channel)"
+    )
+    parser.add_argument("--client-id", default="nevoflux-daemon", help="Device Grant client_id")
     parser.add_argument(
         "--wifi-only",
         action="store_true",
@@ -345,19 +446,35 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _main_wifi_only(args)
     if not args.code:
         parser.error("--code is required unless --wifi-only is given")
-
-    print("[1/3] 正在派生双通道 ID 与 AES-256-GCM 密钥 (Argon2id m=65536, t=3, p=4)...")
-    material = derive_pairing_material(args.code)
+    control_channel = args.control_channel or (control_channel_from_link(args.link) if args.link else "")
+    if not control_channel:
+        parser.error("--link (or --control-channel) from /pair-device is required")
+    code = normalize_pairing_code(args.code)
 
     account_token = args.token
     if not account_token:
-        print("[2/3] 正在通过 Device Grant 为本吊坠签发独立 7 天 session token...")
-        account_token = request_independent_device_token(args.base_url)
+        print("[1/4] 正在通过 Device Grant 为本吊坠签发独立账号会话...")
+        account_token = request_independent_device_token(args.base_url, client_id=args.client_id)
     else:
-        print("[2/3] 使用已提供的独立 account_token...")
+        print("[1/4] 使用已提供的独立 account_token...")
+
+    print("[2/4] 正在派生控制通道密钥 (Argon2id m=65536, t=3, p=4)...")
+    control_key = derive_channel_key(code, control_channel)
+
+    data_channel = args.data_channel
+    if not data_channel:
+        print("[3/4] 正在经 Relay 向电脑端询问数据通道 ID...")
+        jwt = mint_relay_jwt(account_token, args.base_url)
+        data_channel = fetch_data_channel_id(control_channel, control_key, jwt, args.relay_url)
+    material = DerivedPairingMaterial(
+        control_channel_id=control_channel,
+        control_key=control_key,
+        data_channel_id=data_channel,
+        data_key=derive_channel_key(code, data_channel),
+    )
 
     if not args.port:
-        print("[3/3] 未指定 --port，输出派生结果摘要：")
+        print("[4/4] 未指定 --port，输出派生结果摘要：")
         print(
             json.dumps(
                 {
@@ -372,7 +489,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 0
 
-    print(f"[3/3] 正在连接 {args.port}，请在吊坠提示后 15 秒内按一下 BOOT 键确认...")
+    print(f"[4/4] 正在连接 {args.port}，请在吊坠提示后 15 秒内按一下 BOOT 键确认...")
     with _open_line_transport(args.port, args.baud) as rpc:
         execute_provisioning_handshake(
             send_line=rpc,

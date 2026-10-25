@@ -1,21 +1,72 @@
 #include "nevoflux_app.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct {
-    char   sent_msgs[16][512];
+    char   sent[256][9000];
     size_t count;
+    int    stops;
 } tx_capture_t;
 
-static void capture_send_json(const char *wire_json, void *user_ctx)
+static tx_capture_t s_cap;
+
+static void capture_frame(const char *frame_json, void *ctx)
 {
-    tx_capture_t *cap = (tx_capture_t *)user_ctx;
-    assert(cap->count < 16U);
-    snprintf(cap->sent_msgs[cap->count++], sizeof(cap->sent_msgs[0]), "%s", wire_json);
+    tx_capture_t *cap = (tx_capture_t *)ctx;
+    assert(cap->count < 256U);
+    snprintf(cap->sent[cap->count++], sizeof(cap->sent[0]), "%s", frame_json);
 }
 
-static void test_token_mgr_and_relay_url(void)
+static void capture_stop(void *ctx)
+{
+    ((tx_capture_t *)ctx)->stops++;
+}
+
+static size_t count_kind(const char *kind)
+{
+    char needle[64];
+    snprintf(needle, sizeof(needle), "\"kind\":\"%s\"", kind);
+    size_t n = 0;
+    for (size_t i = 0; i < s_cap.count; ++i) {
+        if (strstr(s_cap.sent[i], needle)) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static const char *last_kind(const char *kind)
+{
+    char needle[64];
+    snprintf(needle, sizeof(needle), "\"kind\":\"%s\"", kind);
+    for (size_t i = s_cap.count; i > 0; --i) {
+        if (strstr(s_cap.sent[i - 1U], needle)) {
+            return s_cap.sent[i - 1U];
+        }
+    }
+    return NULL;
+}
+
+static void new_app(nf_app_ctx_t *app)
+{
+    memset(&s_cap, 0, sizeof(s_cap));
+    nf_app_io_t io = {.send_frame = capture_frame, .stop_playback = capture_stop, .ctx = &s_cap};
+    nf_app_init(app, 0x00000001U, &io);
+    nf_app_set_link(app, true);
+}
+
+static void feed(nf_app_ctx_t *app, size_t frames, bool speech)
+{
+    uint8_t pcm[NF_PCM_BYTES_PER_FRAME];
+    memset(pcm, 0x11, sizeof(pcm));
+    for (size_t i = 0; i < frames; ++i) {
+        nf_app_on_mic_frame(app, pcm, speech);
+    }
+}
+
+static void test_token_mgr_and_urls(void)
 {
     nf_token_mgr_t tm;
     nf_token_mgr_init(&tm);
@@ -26,173 +77,249 @@ static void test_token_mgr_and_relay_url(void)
     assert(strstr(hdrs, "Authorization: Bearer sess_tok_7d") != NULL);
     assert(strstr(hdrs, "User-Agent: nevoflux-pendant/0.1") != NULL);
 
-    /* Mint 15m JWT at t=1000ms */
     assert(nf_token_mgr_parse_response(&tm, 200, "{\"token\":\"jwt_15min_abc\"}", 1000ULL));
-    assert(tm.valid && !tm.auth_revoked);
-    assert(strcmp(tm.jwt, "jwt_15min_abc") == 0);
+    assert(tm.valid && strcmp(tm.jwt, "jwt_15min_abc") == 0);
     assert(!nf_token_mgr_needs_refresh(&tm, 60000ULL));
-
-    /* Refresh needed within 90s of 15m expiry */
     assert(nf_token_mgr_needs_refresh(&tm, 1000ULL + (14ULL * 60ULL * 1000ULL)));
+    assert(nf_token_mgr_accept_header_jwt(&tm, "hdr.jwt.sig", 5000ULL));
+    assert(strcmp(tm.jwt, "hdr.jwt.sig") == 0);
 
-    /* Build Relay WS URLs matching portal-relay/?c=<id>&t=<jwt> */
-    char ws_url[256];
+    char url[256];
     assert(nf_relay_build_ws_url("wss://relay.nevoflux.app/", "0123456789abcdef0123456789abcdef",
-                                 false, tm.jwt, ws_url, sizeof(ws_url)) > 0);
-    assert(strcmp(ws_url, "wss://relay.nevoflux.app/?c=0123456789abcdef0123456789abcdef&t=jwt_15min_abc") == 0);
+                                 false, tm.jwt, url, sizeof(url)) > 0);
+    assert(strcmp(url, "wss://relay.nevoflux.app/?c=0123456789abcdef0123456789abcdef&t=hdr.jwt.sig") == 0);
+    assert(nf_lan_build_ws_url("192.168.1.5", 0, "abcd", url, sizeof(url)) > 0);
+    assert(strcmp(url, "ws://192.168.1.5:47821/?c=abcd") == 0);
 
-    assert(nf_relay_build_ws_url("wss://relay.nevoflux.app", "0123456789abcdef0123456789abcdef",
-                                 true, tm.jwt, ws_url, sizeof(ws_url)) > 0);
-    assert(strcmp(ws_url, "wss://relay.nevoflux.app/?c=0123456789abcdef0123456789abcdef-m&t=jwt_15min_abc") == 0);
+    /* Must match nevoflux-agent remote/lan.rs channel_tag("abc") */
+    char tag[9];
+    nf_lan_channel_tag("abc", tag);
+    assert(strcmp(tag, "ba7816bf") == 0);
+    assert(nf_lan_txt_has_tag("00000000,ba7816bf", tag));
+    assert(nf_lan_txt_has_tag("ba7816bf", tag));
+    assert(!nf_lan_txt_has_tag("ba7816bf0,1", tag));
+    assert(!nf_lan_txt_has_tag("", tag));
 
-    /* HTTP 401 marks token revoked and stops infinite retry */
+    char wire[128];
+    assert(nf_wire_wrap_frame("{\"kind\":\"sync\"}", wire, sizeof(wire)) > 0);
+    assert(strcmp(wire, "{\"k\":\"frame\",\"frame\":{\"kind\":\"sync\"}}") == 0);
+
     assert(!nf_token_mgr_parse_response(&tm, 401, "unauthorized", 2000ULL));
     assert(tm.auth_revoked && !nf_token_mgr_needs_refresh(&tm, 3000ULL));
+    printf("[PASS] token manager, relay/LAN urls, mDNS tag, wire wrap\n");
 }
 
-static void test_500ms_bounded_uplink_queue(void)
+static void test_ptt_chunks_and_turn(void)
 {
-    nf_uplink_queue_t q;
-    nf_uplink_queue_init(&q);
+    static nf_app_ctx_t app;
+    new_app(&app);
 
-    uint8_t dummy_frame[32];
-    /* Push 30 frames into a 25-frame (500ms) bounded queue */
-    for (uint8_t i = 0; i < 30U; ++i) {
-        memset(dummy_frame, i, sizeof(dummy_frame));
-        assert(nf_uplink_queue_push(&q, dummy_frame, sizeof(dummy_frame)));
-    }
-    /* Oldest 5 frames (0..4) must be dropped; 25 newest frames (5..29) retained */
-    assert(q.count == 25U);
-    assert(q.dropped_frames == 5U);
-
-    uint8_t out[32];
-    size_t out_len = 0U;
-    assert(nf_uplink_queue_pop(&q, out, sizeof(out), &out_len));
-    assert(out_len == sizeof(dummy_frame) && out[0] == 5U);
-}
-
-static void test_ptt_short_pause_and_20s_auto_split(void)
-{
-    tx_capture_t cap = {0};
-    nf_app_ctx_t app;
-    nf_app_init(&app, 0x00000002U, capture_send_json, &cap);
-
-    uint8_t pcm[NF_PCM_BYTES_PER_FRAME];
-    memset(pcm, 0x11, sizeof(pcm));
-
-    /* 1. Hold BOOT -> enters LISTENING and enqueues START frame for utterance #0 */
     nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
     assert(app.state == NF_APP_STATE_LISTENING);
-    assert(app.utterance_open);
-    uint64_t first_utt_id = app.current_utterance_id;
+    assert(count_kind("speech_start") == 1U);
+    assert(strstr(last_kind("speech_start"), "\"utterance_id\":\"4294967296\""));
+    assert(strstr(last_kind("speech_start"), "\"sample_rate\":16000"));
 
-    /* 2. Short pause (<20s, e.g. 50 frames = 1s of silence while holding BOOT) MUST NOT split END */
-    for (int i = 0; i < 50; ++i) {
-        nf_app_on_mic_frame(&app, pcm, false);
-    }
-    assert(app.utterance_open);
-    assert(app.current_utterance_id == first_utt_id);
+    /* 1 s of speech = 50 frames = five 200 ms chunks */
+    feed(&app, 50, true);
+    assert(count_kind("speech_chunk") == 5U);
+    const char *chunk = last_kind("speech_chunk");
+    assert(strstr(chunk, "\"seq\":4"));
+    /* 6400 PCM bytes -> 8536 base64 chars */
+    const char *pcm = strstr(chunk, "\"pcm\":\"") + 7;
+    assert(strlen(pcm) == 8536U + 2U); /* + closing quote and brace */
 
-    /* 3. Speak past 20s (1000 frames total), then hit 1 silence frame -> auto-splits into utterance #1! */
-    for (int i = 50; i < 1000; ++i) {
-        nf_app_on_mic_frame(&app, pcm, true);
-    }
-    nf_app_on_mic_frame(&app, pcm, false); /* 1000th frame is silence -> triggers auto-split */
-    assert(app.utterance_open);
-    assert(app.current_utterance_id == first_utt_id + 1ULL);
-    assert(app.pending_finals_count == 2U);
-
-    /* 4. First segment's speech_final arrives while user is STILL holding BOOT -> must NOT send yet! */
-    nf_app_on_speech_final(&app, first_utt_id, "帮我查一下上周的", true);
-    assert(cap.count == 0U);
-
-    /* 5. User releases BOOT -> enters WAITING_REPLY; second speech_final arrives -> sends concatenated text! */
+    feed(&app, 3, true);
     nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
     assert(app.state == NF_APP_STATE_WAITING_REPLY);
-    nf_app_on_speech_final(&app, first_utt_id + 1ULL, "项目会议纪要", true);
-    assert(cap.count == 1U);
-    assert(strcmp(cap.sent_msgs[0],
-                  "{\"k\":\"frame\",\"frame\":{\"kind\":\"send\",\"text\":\"帮我查一下上周的项目会议纪要\"}}") == 0);
+    assert(count_kind("speech_chunk") == 6U); /* the tail was flushed */
+    assert(count_kind("speech_end") == 1U);
+
+    nf_app_on_speech_partial(&app, "4294967296", "今天");
+    nf_app_on_speech_final(&app, "999", "stale", true); /* not ours: ignored */
+    assert(count_kind("user_message") == 0U);
+    nf_app_on_speech_final(&app, "4294967296", "今天天气\"好\"", true);
+    assert(count_kind("user_message") == 1U);
+    const char *um = last_kind("user_message");
+    assert(strstr(um, "\"text\":\"今天天气\\\"好\\\"\""));
+    assert(strstr(um, "\"voice\":true"));
+
+    /* The answer: text streams in, then sentences are spoken */
+    nf_app_on_stream_delta(&app, "晴天。");
+    assert(strstr(app.screen_transcript, "晴天"));
+    assert(nf_app_on_voice_audio(&app, "vt_1", 0));
+    assert(app.state == NF_APP_STATE_PLAYING);
+    assert(!nf_app_on_voice_audio(&app, "vt_other", 0));
+    assert(nf_app_on_voice_audio(&app, "vt_1", 1));
+    nf_app_on_turn_end(&app);
+    nf_app_on_playback_drained(&app); /* voice not done yet: keep playing */
+    assert(app.state == NF_APP_STATE_PLAYING);
+    nf_app_on_voice_done(&app, "vt_1");
+    nf_app_on_playback_drained(&app);
+    assert(app.state == NF_APP_STATE_IDLE);
+    printf("[PASS] push-to-talk: 200ms chunks, final -> user_message(voice), spoken answer\n");
 }
 
-static void test_meeting_mode_and_barge_in(void)
+static void test_tap_is_cancelled_and_silence_is_told(void)
 {
-    tx_capture_t cap = {0};
-    nf_app_ctx_t app;
-    nf_app_init(&app, 0x00000005U, capture_send_json, &cap);
+    static nf_app_ctx_t app;
+    new_app(&app);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    feed(&app, 5, true);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
+    assert(app.state == NF_APP_STATE_IDLE);
+    assert(count_kind("speech_cancel") == 1U);
+    assert(strstr(last_kind("speech_cancel"), "\"reason\":\"too_short\""));
 
-    uint8_t pcm[NF_PCM_BYTES_PER_FRAME];
-    memset(pcm, 0x22, sizeof(pcm));
-
-    /* 1. Double-click BOOT -> enters hands-free Meeting Mode */
-    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_DOUBLE_CLICK);
-    assert(app.state == NF_APP_STATE_MEETING);
-    assert(!app.utterance_open);
-
-    /* Speech onset opens utterance automatically */
-    nf_app_on_mic_frame(&app, pcm, true);
-    assert(app.utterance_open);
-    uint64_t meet_utt = app.current_utterance_id;
-
-    /* 40 frames (800ms) of silence automatically closes utterance with END */
-    for (uint32_t i = 0; i < NF_MEETING_SILENCE_FRAMES; ++i) {
-        nf_app_on_mic_frame(&app, pcm, false);
-    }
-    assert(!app.utterance_open);
-
-    /* speech_final in Meeting Mode updates screen transcript WITHOUT sending TTS trigger */
-    nf_app_on_speech_final(&app, meet_utt, "第一条会议结论已记录", true);
-    assert(strcmp(app.screen_transcript, "第一条会议结论已记录") == 0);
-    assert(cap.count == 0U);
-
-    /* Double-click BOOT exits Meeting Mode back to IDLE */
-    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_DOUBLE_CLICK);
+    /* A real press whose transcript is rejected: no turn, back to idle */
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    feed(&app, 30, true);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
+    nf_app_on_speech_final(&app, app.utterance_id, "", false);
+    assert(count_kind("user_message") == 0U);
     assert(app.state == NF_APP_STATE_IDLE);
 
-    /* 2. Downlink TTS Asset offer -> pipelines 2 x 16KB asset_pull requests */
-    nf_app_on_asset_offer(&app, "tts_wav_01", 40000ULL, true);
-    assert(app.state == NF_APP_STATE_PLAYING);
-    assert(cap.count == 2U);
-    assert(strstr(cap.sent_msgs[0], "\"offset\":0,\"length\":16384") != NULL);
-    assert(strstr(cap.sent_msgs[1], "\"offset\":16384,\"length\":16384") != NULL);
-
-    /* Simulate first NFM1 chunk arriving with 24kHz WAV header -> switches ES8311 to 24000Hz */
-    uint8_t wav24k[64] = {
-        'R', 'I', 'F', 'F', 0x24, 0x80, 0x00, 0x00, 'W', 'A', 'V', 'E',
-        'f', 'm', 't', ' ', 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
-        0xC0, 0x5D, 0x00, 0x00, 0x80, 0xBB, 0x00, 0x00, 0x02, 0x00, 0x10, 0x00,
-        'd', 'a', 't', 'a', 0x00, 0x80, 0x00, 0x00,
-        0x01, 0x02, 0x03, 0x04
-    };
-    nfm1_frame_t frame = {
-        .has_seq = false,
-        .id = "tts_wav_01",
-        .offset = 0ULL,
-        .flags = NFM1_FLAG_NO_SEQ,
-        .eof = false,
-        .payload = wav24k,
-        .payload_len = 48U,
-    };
-    const uint8_t *pcm_ptr = NULL;
-    size_t pcm_len = 0U;
-    assert(nf_asset_stream_on_nfm1(&app.downlink_stream, &frame, &pcm_ptr, &pcm_len));
-    assert(bsp_audio_get_sample_rate() == 24000U);
-    assert(pcm_len == 4U && pcm_ptr[0] == 0x01U);
-
-    /* 3. Hold BOOT during PLAYING -> sends voice_barge_in, restores 16kHz, enters LISTENING */
+    /* Link down: pressing does nothing on the wire */
+    nf_app_set_link(&app, false);
+    size_t before = s_cap.count;
     nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    assert(s_cap.count == before && app.state == NF_APP_STATE_IDLE);
+    printf("[PASS] tap -> speech_cancel(too_short); rejected final -> idle; link down -> no-op\n");
+}
+
+static void test_20s_split_joins_transcripts(void)
+{
+    static nf_app_ctx_t app;
+    new_app(&app);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    char first[NF_ID_CAP];
+    snprintf(first, sizeof(first), "%s", app.utterance_id);
+    feed(&app, NF_PTT_MAX_FRAMES_PER_SEG, true);
+    assert(count_kind("speech_end") == 0U); /* still speaking: no split */
+    feed(&app, 1, false);                   /* first silence past 20 s: split */
+    assert(count_kind("speech_end") == 1U);
+    assert(count_kind("speech_start") == 2U);
+    char second[NF_ID_CAP];
+    snprintf(second, sizeof(second), "%s", app.utterance_id);
+    assert(strcmp(first, second) != 0);
+    feed(&app, 20, true);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
+
+    nf_app_on_speech_final(&app, second, "第二段", true); /* out of order */
+    assert(count_kind("user_message") == 0U);
+    nf_app_on_speech_final(&app, first, "第一段", true);
+    assert(count_kind("user_message") == 1U);
+    assert(strstr(last_kind("user_message"), "\"text\":\"第一段第二段\""));
+    printf("[PASS] >20s push-to-talk splits on silence, one turn after the last final\n");
+}
+
+static void test_barge_in_and_meeting(void)
+{
+    static nf_app_ctx_t app;
+    new_app(&app);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    feed(&app, 20, true);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
+    nf_app_on_speech_final(&app, app.pending[0].id, "讲个故事", true);
+    assert(nf_app_on_voice_audio(&app, "vt_9", 0));
+    assert(nf_app_on_voice_audio(&app, "vt_9", 1));
+
+    /* Pressing BOOT mid-answer: local stop first, then voice_barge_in, then a new utterance */
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    assert(s_cap.stops == 1);
+    const char *bi = last_kind("voice_barge_in");
+    assert(bi && strstr(bi, "\"turn_id\":\"vt_9\"") && strstr(bi, "\"played\":1"));
     assert(app.state == NF_APP_STATE_LISTENING);
-    assert(bsp_audio_get_sample_rate() == 16000U);
-    assert(cap.count == 3U);
-    assert(strcmp(cap.sent_msgs[2], "{\"k\":\"frame\",\"frame\":{\"kind\":\"voice_barge_in\"}}") == 0);
+    assert(!nf_app_on_voice_audio(&app, "vt_9", 2)); /* late audio of the barged turn */
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_PWR_CLICK);
+    assert(app.state == NF_APP_STATE_IDLE);
+    assert(strstr(last_kind("speech_cancel"), "user_stopped"));
+
+    /* Meeting: VAD-driven segments, transcripts on screen, never a turn */
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_DOUBLE_CLICK);
+    assert(app.state == NF_APP_STATE_MEETING);
+    size_t starts = count_kind("speech_start");
+    feed(&app, 10, false);
+    assert(count_kind("speech_start") == starts);
+    feed(&app, 30, true);
+    feed(&app, NF_MEETING_SILENCE_FRAMES, false);
+    assert(count_kind("speech_start") == starts + 1U);
+    assert(count_kind("speech_end") >= 1U);
+    char seg1[NF_ID_CAP];
+    snprintf(seg1, sizeof(seg1), "%s", app.utterance_id);
+    feed(&app, 30, true);
+    feed(&app, NF_MEETING_SILENCE_FRAMES, false);
+    nf_app_on_speech_final(&app, app.utterance_id, "会议第二句", true); /* out of order */
+    nf_app_on_speech_final(&app, seg1, "会议第一句", true);
+    assert(strstr(app.screen_transcript, "会议第一句"));
+    assert(strstr(app.screen_transcript, "会议第二句"));
+    size_t turns = count_kind("user_message");
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_DOUBLE_CLICK);
+    assert(app.state == NF_APP_STATE_IDLE && count_kind("user_message") == turns);
+    printf("[PASS] barge-in (stop, voice_barge_in, ignore late audio), meeting mode\n");
+}
+
+static void test_text_only_answer_times_out(void)
+{
+    static nf_app_ctx_t app;
+    new_app(&app);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    feed(&app, 20, true);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
+    nf_app_on_speech_final(&app, app.pending[0].id, "你好", true);
+    nf_app_tick(&app, 1000ULL);
+    nf_app_on_turn_end(&app);
+    nf_app_tick(&app, 1000ULL + NF_VOICE_GRACE_MS - 1ULL);
+    assert(app.state == NF_APP_STATE_WAITING_REPLY);
+    nf_app_tick(&app, 1000ULL + NF_VOICE_GRACE_MS);
+    assert(app.state == NF_APP_STATE_IDLE);
+    printf("[PASS] a turn that ends without voice returns to idle\n");
+}
+
+static void test_reply_wav_to_16k(void)
+{
+    /* 24 kHz mono 16-bit WAV, 2400 samples of a constant */
+    size_t n = 2400U;
+    size_t len = 44U + n * 2U;
+    uint8_t *wav = calloc(1, len);
+    memcpy(wav, "RIFF", 4);
+    uint32_t riff = (uint32_t)(len - 8U);
+    memcpy(wav + 4, &riff, 4);
+    memcpy(wav + 8, "WAVEfmt ", 8);
+    uint32_t fmt_len = 16U;
+    uint16_t pcm_fmt = 1U, ch = 1U, bits = 16U, align = 2U;
+    uint32_t rate = 24000U, byte_rate = 48000U, data_len = (uint32_t)(n * 2U);
+    memcpy(wav + 16, &fmt_len, 4);
+    memcpy(wav + 20, &pcm_fmt, 2);
+    memcpy(wav + 22, &ch, 2);
+    memcpy(wav + 24, &rate, 4);
+    memcpy(wav + 28, &byte_rate, 4);
+    memcpy(wav + 32, &align, 2);
+    memcpy(wav + 34, &bits, 2);
+    memcpy(wav + 36, "data", 4);
+    memcpy(wav + 40, &data_len, 4);
+    for (size_t i = 0; i < n; ++i) {
+        int16_t v = 1234;
+        memcpy(wav + 44 + 2 * i, &v, 2);
+    }
+    static int16_t out[4000];
+    size_t got = nf_reply_wav_to_16k(wav, len, out, 4000);
+    assert(got >= 1598U && got <= 1600U);
+    assert(out[got / 2U] == 1234);
+    assert(nf_reply_wav_to_16k(wav, 20, out, 4000) == 0U);
+    free(wav);
+    printf("[PASS] 24 kHz WAV -> 16 kHz PCM\n");
 }
 
 int main(void)
 {
-    test_token_mgr_and_relay_url();
-    test_500ms_bounded_uplink_queue();
-    test_ptt_short_pause_and_20s_auto_split();
-    test_meeting_mode_and_barge_in();
-    printf("[PASS] All apps/nevoflux integration & FSM tests passed!\n");
+    test_token_mgr_and_urls();
+    test_ptt_chunks_and_turn();
+    test_tap_is_cancelled_and_silence_is_told();
+    test_20s_split_joins_transcripts();
+    test_barge_in_and_meeting();
+    test_text_only_answer_times_out();
+    test_reply_wav_to_16k();
+    printf("[PASS] All NevoFlux app unit tests passed!\n");
     return 0;
 }

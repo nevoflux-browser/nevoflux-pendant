@@ -51,7 +51,8 @@ typedef enum {
 typedef struct {
     bool     wifi_connected;
     bool     relay_connected;
-    bool     daemon_online;    /* true when portal-relay reports peers > 0 */
+    bool     daemon_online;    /* true when the head is on the channel (peers > 0) */
+    const char *link_label;    /* transport name for the status line: "局域网" / "Relay"; NULL = "Relay" */
     uint8_t  battery_percent;  /* 0..100 */
     const char *mode_label;    /* e.g. "待机", "聆听中…", "思考中…", "播报中…", "会议录音中" */
     const char *transcript;    /* UTF-8 partial/final transcript or prompt */

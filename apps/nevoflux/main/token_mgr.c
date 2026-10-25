@@ -88,3 +88,19 @@ bool nf_token_mgr_parse_response(nf_token_mgr_t *mgr,
     mgr->auth_revoked = false;
     return true;
 }
+
+bool nf_token_mgr_accept_header_jwt(nf_token_mgr_t *mgr, const char *jwt, uint64_t now_ms)
+{
+    if (!mgr || !jwt) {
+        return false;
+    }
+    size_t len = strlen(jwt);
+    if (len == 0U || len >= sizeof(mgr->jwt)) {
+        return false;
+    }
+    memcpy(mgr->jwt, jwt, len + 1U);
+    mgr->minted_at_ms = now_ms;
+    mgr->valid = true;
+    mgr->auth_revoked = false;
+    return true;
+}
