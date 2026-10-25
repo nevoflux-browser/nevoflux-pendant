@@ -1,4 +1,5 @@
 #include "bsp_143c.h"
+#include "bsp_internal.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -147,15 +148,8 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 
 static void touch_hw_init(void)
 {
-    i2c_master_bus_config_t bus_cfg = {
-        .i2c_port = BSP_I2C_NUM,
-        .sda_io_num = BSP_PIN_I2C_SDA,
-        .scl_io_num = BSP_PIN_I2C_SCL,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-    if (i2c_new_master_bus(&bus_cfg, &s_i2c_bus) != ESP_OK) {
+    s_i2c_bus = bsp_i2c_get_bus(); /* shared with the ES8311 / ES7210 codecs */
+    if (!s_i2c_bus) {
         ESP_LOGW(TAG, "I2C bus init failed; touch disabled");
         return;
     }

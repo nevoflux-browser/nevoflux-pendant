@@ -1,0 +1,20 @@
+menu "Waveshare 1.43C BSP"
+
+    config BSP_AUDIO_BOOT_SELFTEST
+        bool "Audio self-test at init (1 kHz beep + mic level on the log)"
+        default y
+        help
+            When bsp_audio_init() runs, play a 150 ms beep through ES8311 and log
+            the RMS / peak level of the first two ES7210 channels for 0.4 s.
+
+    config BSP_AUDIO_SPK_VOLUME
+        int "Speaker volume (0-100)"
+        range 0 100
+        default 80
+
+    config BSP_AUDIO_MIC_GAIN_DB
+        int "Microphone PGA gain (dB)"
+        range 0 37
+        default 30
+
+endmenu

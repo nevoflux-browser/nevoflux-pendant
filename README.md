@@ -159,6 +159,8 @@ The Launcher then shows `SSID · IP · RSSI` under the title once the router ass
 
 UI fonts (`components/bsp_143c/src/fonts/`) are subset to the strings used in the firmware; regenerate with `python3 tools/fonts/gen_ui_font.py` after adding new Chinese UI text.
 
+Audio (ES8311 speaker DAC + ES7210 mics) uses `espressif/esp_codec_dev` with the same TDM setup as the official Waveshare `04_Audio_Test`. When NevoFlux starts it plays a short 1 kHz beep and logs `bsp_audio: self-test: mic ch0/ch1 rms=… peak=…`; disable with `CONFIG_BSP_AUDIO_BOOT_SELFTEST=n` (volume / mic gain: `CONFIG_BSP_AUDIO_SPK_VOLUME`, `CONFIG_BSP_AUDIO_MIC_GAIN_DB`).
+
 ### 6. Flashing on Windows 10
 
 1. **Copy the files** to the Windows PC (e.g. `C:\fw\`): `build/firmware/nevoflux-pendant-8MB.bin` and `tools/provision/provision.py`. Optionally verify the image against `build/firmware/SHA256SUMS`:

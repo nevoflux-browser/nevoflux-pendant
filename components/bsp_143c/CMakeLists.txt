@@ -1,5 +1,5 @@
 if(ESP_PLATFORM)
-    set(BSP_FONT_SRCS "src/fonts/nf_font_20.c" "src/fonts/nf_font_32.c")
+    set(BSP_FONT_SRCS "src/fonts/nf_font_20.c" "src/fonts/nf_font_32.c" "src/bsp_i2c.c")
 endif()
 
 idf_component_register(

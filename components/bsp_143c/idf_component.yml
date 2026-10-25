@@ -4,3 +4,5 @@ dependencies:
   espressif/esp_lcd_sh8601: "^2.0.1"
   espressif/esp_lvgl_port: "~2.4.4"
   lvgl/lvgl: "~9.2.2"
+  # ES8311 DAC + ES7210 mic ADC (same component/version as the official Waveshare 04_Audio_Test)
+  espressif/esp_codec_dev: "==1.5.4"
