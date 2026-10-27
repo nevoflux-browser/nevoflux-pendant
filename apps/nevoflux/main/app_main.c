@@ -16,6 +16,7 @@
 #include "freertos/task.h"
 #include "nf_link.h"
 #include "nf_player.h"
+#include "decoder/impl/esp_opus_dec.h"
 
 static const char *TAG = "nevoflux";
 #endif
@@ -113,6 +114,60 @@ static void play_voice_audio(const char *wav_b64)
     free(wav);
 }
 
+/*
+ * One spoken sentence as Opus (what this pendant asks for: `voice_codec`):
+ * base64 of length-prefixed 16 kHz mono 20 ms packets -> speaker queue. Each
+ * sentence was encoded from a fresh encoder, so the decoder starts fresh too.
+ */
+static void play_voice_opus(const char *opus_b64)
+{
+    static void *s_dec;
+    static int16_t s_pcm[960]; /* up to 60 ms at 16 kHz; packets here are 20 ms */
+    if (!s_dec) {
+        esp_opus_dec_cfg_t cfg = {
+            .sample_rate = 16000,
+            .channel = 1,
+            .frame_duration = ESP_OPUS_DEC_FRAME_DURATION_20_MS,
+            .self_delimited = false,
+        };
+        if (esp_opus_dec_open(&cfg, sizeof(cfg), &s_dec) != ESP_AUDIO_ERR_OK) {
+            s_dec = NULL;
+            ESP_LOGE(TAG, "no Opus decoder");
+            return;
+        }
+    } else {
+        (void)esp_opus_dec_reset(s_dec);
+    }
+
+    size_t b64_len = strlen(opus_b64);
+    size_t cap = b64_len / 4U * 3U + 3U;
+    uint8_t *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        return;
+    }
+    bool ok = false;
+    size_t len = nf_b64_decode(opus_b64, b64_len, buf, cap, &ok);
+    size_t off = 0U;
+    const uint8_t *pkt = NULL;
+    size_t pkt_len = 0U;
+    unsigned bad = 0U;
+    while (ok && nf_opus_next_packet(buf, len, &off, &pkt, &pkt_len)) {
+        esp_audio_dec_in_raw_t raw = {.buffer = (uint8_t *)pkt, .len = (uint32_t)pkt_len};
+        esp_audio_dec_out_frame_t out = {.buffer = (uint8_t *)s_pcm, .len = sizeof(s_pcm)};
+        esp_audio_dec_info_t info = {0};
+        if (esp_opus_dec_decode(s_dec, &raw, &out, &info) != ESP_AUDIO_ERR_OK) {
+            ++bad;
+            continue;
+        }
+        (void)nf_player_push(s_pcm, out.decoded_size / sizeof(int16_t));
+    }
+    if (!ok || off != len || bad > 0U) {
+        ESP_LOGW(TAG, "voice_audio opus: %u of %u bytes used, %u bad packets", (unsigned)off,
+                 (unsigned)len, bad);
+    }
+    free(buf);
+}
+
 /* One decrypted data-channel message from the head. */
 static void dispatch(const char *plaintext)
 {
@@ -143,7 +198,11 @@ static void dispatch(const char *plaintext)
                                           cJSON_IsNumber(seq) ? (uint32_t)seq->valuedouble : 0U);
         APP_UNLOCK();
         if (play) {
-            play_voice_audio(jstr(frame, "wav"));
+            if (strcmp(jstr(frame, "codec"), "opus") == 0) {
+                play_voice_opus(jstr(frame, "opus"));
+            } else {
+                play_voice_audio(jstr(frame, "wav"));
+            }
         }
         cJSON_Delete(root);
         return;
@@ -270,14 +329,19 @@ void app_main(void)
             (void)prov_nvs_load_pendant(&pendant_cfg);
         }
 
-        /* Whatever the head sent since the last pass (bounded, to keep the UI moving) */
-        for (int i = 0; i < 8; ++i) {
+        /* Everything the head sent since the last pass, then one redraw below: a
+         * reply streams a delta per token, and redrawing per delta could not keep
+         * up. The time budget keeps keys and the watchdog serviced in a flood. */
+        for (uint64_t start = t_ms;;) {
             char *msg = nf_link_poll();
             if (!msg) {
                 break;
             }
             dispatch(msg);
             nf_link_free(msg);
+            if ((uint64_t)(esp_timer_get_time() / 1000LL) - start >= 40ULL) {
+                break;
+            }
         }
         if (nf_player_take_drained()) {
             APP_LOCK();

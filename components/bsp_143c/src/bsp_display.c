@@ -338,7 +338,8 @@ bool bsp_display_init(void)
     const lvgl_port_display_cfg_t disp_cfg = {
         .io_handle = s_io,
         .panel_handle = s_panel,
-        .buffer_size = BSP_LCD_H_RES * 40,
+        /* 2 x 20 lines of internal DMA RAM (~37 KB); 40 lines starved Wi-Fi + TLS */
+        .buffer_size = BSP_LCD_H_RES * 20,
         .double_buffer = true,
         .hres = BSP_LCD_H_RES,
         .vres = BSP_LCD_V_RES,

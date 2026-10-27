@@ -108,8 +108,9 @@ def argon2id_raw(
     except ImportError:
         pass
 
-    lib_path = ctypes.util.find_library("argon2") or "libargon2.so.1"
-    lib = ctypes.CDLL(lib_path)
+    lib = _load_libargon2()
+    if lib is None:
+        raise RuntimeError("需要 argon2-cffi：pip install argon2-cffi")
 
     # int argon2id_hash_raw(const uint32_t t_cost, const uint32_t m_cost,
     #                       const uint32_t parallelism, const void *pwd,
@@ -144,6 +145,34 @@ def argon2id_raw(
     if rc != 0:
         raise RuntimeError(f"argon2id_hash_raw failed with error code {rc}")
     return out_buf.raw
+
+
+def _load_libargon2():
+    """The system libargon2 (Linux), or None when it is not installed (e.g. Windows)."""
+    for name in (ctypes.util.find_library("argon2"), "libargon2.so.1"):
+        if not name:
+            continue
+        try:
+            return ctypes.CDLL(name)
+        except OSError:
+            continue
+    return None
+
+
+def missing_dependencies(need_websocket: bool, need_serial: bool) -> list[str]:
+    """pip packages this run needs but cannot import, checked before any network step."""
+    import importlib.util
+
+    missing = []
+    if importlib.util.find_spec("argon2") is None and _load_libargon2() is None:
+        missing.append("argon2-cffi")
+    if importlib.util.find_spec("cryptography") is None:
+        missing.append("cryptography")
+    if need_websocket and importlib.util.find_spec("websocket") is None:
+        missing.append("websocket-client")
+    if need_serial and importlib.util.find_spec("serial") is None:
+        missing.append("pyserial")
+    return missing
 
 
 def derive_channel_key(
@@ -450,6 +479,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not control_channel:
         parser.error("--link (or --control-channel) from /pair-device is required")
     code = normalize_pairing_code(args.code)
+
+    port = args.port or ""
+    missing = missing_dependencies(
+        need_websocket=not args.data_channel,
+        need_serial=bool(port) and not port.startswith(("tcp://", "ble")),
+    )
+    if missing:
+        print(f"缺少 Python 依赖，请先运行：pip install {' '.join(missing)}", file=sys.stderr)
+        return 2
 
     account_token = args.token
     if not account_token:

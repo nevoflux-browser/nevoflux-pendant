@@ -273,6 +273,20 @@ static void test_codecs(void)
     (void)nf_b64_decode("Zm9*", 4, dec, sizeof(dec), &ok);
     assert(!ok);
 
+    /* Length-prefixed Opus packets: two whole ones, then a length that lies */
+    const uint8_t opus[] = {3, 0, 0xA, 0xB, 0xC, 1, 0, 0xD, 9, 0, 0xE};
+    size_t off = 0;
+    const uint8_t *pkt = NULL;
+    size_t pkt_len = 0;
+    assert(nf_opus_next_packet(opus, sizeof(opus), &off, &pkt, &pkt_len));
+    assert(pkt_len == 3 && pkt == opus + 2 && off == 5);
+    assert(nf_opus_next_packet(opus, sizeof(opus), &off, &pkt, &pkt_len));
+    assert(pkt_len == 1 && pkt[0] == 0xD && off == 8);
+    assert(!nf_opus_next_packet(opus, sizeof(opus), &off, &pkt, &pkt_len));
+    assert(off == 8);
+    off = 0;
+    assert(!nf_opus_next_packet(opus, 1, &off, &pkt, &pkt_len));
+
     char esc[64];
     nf_json_escape("a\"b\\c\n\x01", esc, sizeof(esc));
     assert(strcmp(esc, "a\\\"b\\\\c\\n\\u0001") == 0);

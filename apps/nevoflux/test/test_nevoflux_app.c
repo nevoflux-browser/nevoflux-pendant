@@ -143,6 +143,7 @@ static void test_ptt_chunks_and_turn(void)
     const char *um = last_kind("user_message");
     assert(strstr(um, "\"text\":\"今天天气\\\"好\\\"\""));
     assert(strstr(um, "\"voice\":true"));
+    assert(strstr(um, "\"voice_codec\":\"opus\""));
 
     /* The answer: text streams in, then sentences are spoken */
     nf_app_on_stream_delta(&app, "晴天。");

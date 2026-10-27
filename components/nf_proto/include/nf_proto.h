@@ -209,6 +209,14 @@ size_t nf_b64_encode(const uint8_t *in, size_t in_len, char *out, size_t out_cap
  */
 size_t nf_b64_decode(const char *in, size_t in_len, uint8_t *out, size_t out_cap, bool *out_ok);
 
+/**
+ * Walk a `voice_audio` frame's `opus` payload: packets back to back, each after
+ * its length as a little-endian u16. Sets `*pkt`/`*pkt_len` to the packet at
+ * `*offset` and advances past it. False at the end, or on a length that runs
+ * past the buffer (the rest is not trusted).
+ */
+bool nf_opus_next_packet(const uint8_t *buf, size_t len, size_t *offset, const uint8_t **pkt, size_t *pkt_len);
+
 /** Escape `in` for a JSON string body (no quotes added). Truncates to fit. */
 size_t nf_json_escape(const char *in, char *out, size_t out_cap);
 

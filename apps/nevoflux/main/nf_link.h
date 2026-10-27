@@ -44,7 +44,8 @@ bool nf_link_start(const nf_credentials_t *cred);
 /** Replace credentials (after re-provisioning) and reconnect. */
 void nf_link_restart(const nf_credentials_t *cred);
 
-/** Seal and send one frame object on the data channel. False if not connected. */
+/** Queue one frame object for the data channel (sealed and sent by the link's
+ *  sender task, never blocking the caller). False if not connected or the queue is full. */
 bool nf_link_send_frame(const char *frame_json);
 
 /**

@@ -70,6 +70,10 @@ static bool i2s_tdm_init(void)
 {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(BSP_I2S_NUM, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true; /* play silence on underrun instead of repeating stale DMA */
+    /* 8 x 320 frames = 160 ms of capture (default 6 x 240 = 90 ms) so a busy reader
+     * doesn't lose speech */
+    chan_cfg.dma_desc_num = 8;
+    chan_cfg.dma_frame_num = 320;
     if (i2s_new_channel(&chan_cfg, &s_tx_chan, &s_rx_chan) != ESP_OK) {
         return false;
     }

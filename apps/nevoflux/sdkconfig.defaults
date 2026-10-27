@@ -37,4 +37,12 @@ CONFIG_LV_BUILD_EXAMPLES=n
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
 
 # app_main runs panel/LVGL/WiFi init plus 1.3KB RPC line buffers; 3584 default overflows
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
+# The main loop also decodes the spoken replies (Opus), which wants a few KB more
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# Internal RAM is shared by the LVGL DMA buffers, I2S DMA, task stacks and Wi-Fi;
+# with two WebSocket clients + TLS the Wi-Fi driver ran dry ("wifi:m f null").
+# Anything >= 4 KB without explicit caps (WebSocket buffers, cJSON, frames) goes to PSRAM.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+# Fewer static (internal, 1.6 KB each) Wi-Fi RX buffers; dynamic ones come from PSRAM.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10

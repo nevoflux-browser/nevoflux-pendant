@@ -207,7 +207,8 @@ static void submit_turn(nf_app_ctx_t *app)
     char esc[1100];
     nf_json_escape(app->ptt_accum_text, esc, sizeof(esc));
     int n = snprintf(app->json_scratch, sizeof(app->json_scratch),
-                     "{\"kind\":\"user_message\",\"text\":\"%s\",\"voice\":true}", esc);
+                     "{\"kind\":\"user_message\",\"text\":\"%s\",\"voice\":true,\"voice_codec\":\"opus\"}",
+                     esc);
     if (n > 0 && (size_t)n < sizeof(app->json_scratch)) {
         send_frame(app, app->json_scratch);
     }

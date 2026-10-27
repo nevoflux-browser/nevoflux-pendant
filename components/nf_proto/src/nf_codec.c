@@ -188,3 +188,19 @@ size_t nf_resample(nf_resampler_t *rs,
     }
     return o;
 }
+
+bool nf_opus_next_packet(const uint8_t *buf, size_t len, size_t *offset, const uint8_t **pkt, size_t *pkt_len)
+{
+    if (!buf || !offset || !pkt || !pkt_len || *offset + 2U > len) {
+        return false;
+    }
+    size_t n = (size_t)buf[*offset] | ((size_t)buf[*offset + 1U] << 8);
+    size_t start = *offset + 2U;
+    if (n == 0U || n > len - start) {
+        return false;
+    }
+    *pkt = buf + start;
+    *pkt_len = n;
+    *offset = start + n;
+    return true;
+}

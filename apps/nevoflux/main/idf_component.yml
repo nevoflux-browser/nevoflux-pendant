@@ -4,3 +4,5 @@ dependencies:
   espressif/esp_websocket_client: "^1.4.0"
   # Finds the head on the LAN (`_nevoflux._tcp`)
   espressif/mdns: "^1.4.0"
+  # Opus decoder for the desktop's spoken replies (16 kHz, 20 ms packets)
+  espressif/esp_audio_codec: "^2.4.0"

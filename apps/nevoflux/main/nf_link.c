@@ -18,13 +18,17 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "mdns.h"
 
 static const char *TAG = "nf_link";
 
 #define NF_ACCOUNT_TOKEN_URL   "https://nevoflux.app/api/auth/token"
 #define NF_MAX_MESSAGE_BYTES   (2U * 1024U * 1024U) /* a long spoken sentence is ~0.6 MB */
-#define NF_INBOX_DEPTH         24
+/* Pointers to PSRAM copies; deep enough for a reply's burst of deltas */
+#define NF_INBOX_DEPTH         96
+/* 32 x 200 ms speech chunks = 6.4 s of uplink the network may fall behind by */
+#define NF_OUTBOX_DEPTH        32
 #define NF_LAN_PROBE_MS        1500
 #define NF_LAN_REPROBE_MS      (2U * 60U * 1000U)
 #define NF_SILENT_DEADLINE_MS  (90U * 1000U)
@@ -47,6 +51,8 @@ typedef struct {
 
 static SemaphoreHandle_t s_lock;
 static QueueHandle_t     s_inbox;
+static QueueHandle_t     s_outbox;  /* data frames to send, PSRAM copies */
+static SemaphoreHandle_t s_tx_lock; /* a send never races the data client's teardown */
 static nf_credentials_t  s_cred;
 static volatile bool     s_restart;
 static nf_chan_t         s_ctl = {.is_data = false, .peers = -1};
@@ -57,6 +63,12 @@ static char              s_attached_session[96];
 static uint64_t now_ms(void)
 {
     return (uint64_t)(esp_timer_get_time() / 1000LL);
+}
+
+/* Milliseconds from `then` to `t`; 0 when another task stamped `then` after `t` was read */
+static uint64_t ms_since(uint64_t t, uint64_t then)
+{
+    return t > then ? t - then : 0U;
 }
 
 static void *ps_malloc(size_t n)
@@ -283,7 +295,7 @@ static bool chan_open(nf_chan_t *ch, const char *url, bool tls)
     esp_websocket_client_config_t cfg = {
         .uri = url,
         .buffer_size = 8192,
-        .task_stack = 8192,
+        .task_stack = 12288, /* TLS handshake with certificate-bundle verification */
         .task_prio = 5,
         .disable_auto_reconnect = true,
         .network_timeout_ms = 10000,
@@ -374,7 +386,9 @@ static esp_err_t http_event(esp_http_client_event_t *evt)
 /* A fresh 15-minute relay JWT. The relay only checks it at the upgrade. */
 static bool fetch_jwt(nf_token_mgr_t *tm)
 {
-    http_acc_t acc = {.cap = 4096};
+    static http_acc_t acc; /* only the link task fetches; keeps 1 KB off the TLS stack */
+    memset(&acc, 0, sizeof(acc));
+    acc.cap = 4096;
     acc.body = ps_malloc(acc.cap);
     if (!acc.body) {
         return false;
@@ -430,7 +444,8 @@ static void set_mode(nf_link_mode_t m)
 static void link_task(void *arg)
 {
     (void)arg;
-    nf_token_mgr_t tm;
+    /* Static, not on the stack: the TLS handshake below needs that room */
+    static nf_token_mgr_t tm;
     nf_token_mgr_init(&tm);
     uint32_t backoff = NF_BACKOFF_MIN_MS;
     bool mdns_ready = false;
@@ -446,6 +461,10 @@ static void link_task(void *arg)
         if (!pendant_wifi_wait_connected(5000)) {
             continue;
         }
+        ESP_LOGI(TAG, "heap: internal free %u (largest %u), psram free %u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
         if (!mdns_ready && mdns_init() == ESP_OK) {
             (void)mdns_hostname_set("nevoflux-pendant");
             mdns_ready = true;
@@ -453,8 +472,8 @@ static void link_task(void *arg)
 
         nf_lan_head_t head = {0};
         bool lan = mdns_ready && lan_find_head(&head);
-        char ctl_url[1400];
-        char data_url[1400];
+        static char ctl_url[1400];
+        static char data_url[1400];
         if (lan) {
             ESP_LOGI(TAG, "head found on the LAN at %s:%u", head.ip, (unsigned)head.port);
             (void)nf_lan_build_ws_url(head.ip, head.port, s_cred.control_channel_id, ctl_url, sizeof(ctl_url));
@@ -506,10 +525,13 @@ static void link_task(void *arg)
             if (t - last_ping >= NF_WS_KEEPALIVE_INTERVAL_MS) {
                 /* What the relay watches; answered below its Durable Object, so free */
                 (void)esp_websocket_client_send_text(s_ctl.client, "ping", 4, pdMS_TO_TICKS(1000));
+                xSemaphoreTake(s_tx_lock, portMAX_DELAY);
                 (void)esp_websocket_client_send_text(s_data.client, "ping", 4, pdMS_TO_TICKS(1000));
+                xSemaphoreGive(s_tx_lock);
                 last_ping = t;
             }
-            if (t - s_data.last_rx_ms > NF_SILENT_DEADLINE_MS || t - s_ctl.last_rx_ms > NF_SILENT_DEADLINE_MS) {
+            if (ms_since(t, s_data.last_rx_ms) > NF_SILENT_DEADLINE_MS ||
+                ms_since(t, s_ctl.last_rx_ms) > NF_SILENT_DEADLINE_MS) {
                 ESP_LOGW(TAG, "socket went silent; reconnecting");
                 break;
             }
@@ -533,7 +555,9 @@ static void link_task(void *arg)
 
         bool was_stable = now_ms() - up_at >= 5000ULL;
         chan_close(&s_ctl);
+        xSemaphoreTake(s_tx_lock, portMAX_DELAY);
         chan_close(&s_data);
+        xSemaphoreGive(s_tx_lock);
         set_mode(NF_LINK_DOWN);
         if (switch_to_lan || s_restart) {
             backoff = NF_BACKOFF_MIN_MS;
@@ -547,6 +571,28 @@ static void link_task(void *arg)
     }
 }
 
+/*
+ * Data frames go out from here, not from the caller: a TLS send to the relay can
+ * take longer than the I2S DMA holds (a mic task blocked in it loses audio), and
+ * the client lock is held for as long as a large voice_audio frame takes to arrive.
+ */
+static void sender_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        char *frame = NULL;
+        if (xQueueReceive(s_outbox, &frame, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+        if (s_data.connected && !chan_send_frame(&s_data, frame)) {
+            ESP_LOGW(TAG, "data frame not sent");
+        }
+        xSemaphoreGive(s_tx_lock);
+        free(frame);
+    }
+}
+
 /* ------------------------------------------------------------------ API */
 
 bool nf_link_start(const nf_credentials_t *cred)
@@ -557,13 +603,23 @@ bool nf_link_start(const nf_credentials_t *cred)
     }
     s_lock = xSemaphoreCreateMutex();
     s_inbox = xQueueCreate(NF_INBOX_DEPTH, sizeof(char *));
-    if (!s_lock || !s_inbox) {
+    s_outbox = xQueueCreate(NF_OUTBOX_DEPTH, sizeof(char *));
+    s_tx_lock = xSemaphoreCreateMutex();
+    if (!s_lock || !s_inbox || !s_outbox || !s_tx_lock) {
         return false;
     }
     if (cred) {
         s_cred = *cred;
     }
-    return xTaskCreatePinnedToCore(link_task, "nf_link", 8192, NULL, 5, NULL, 0) == pdPASS;
+    /* The link task never touches flash (credentials are copied above), so its
+     * stack can live in PSRAM; internal RAM is kept for Wi-Fi, DMA and the
+     * WebSocket tasks. */
+    if (xTaskCreatePinnedToCoreWithCaps(sender_task, "nf_send", 8192, NULL, 6, NULL, 0,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        return false;
+    }
+    return xTaskCreatePinnedToCoreWithCaps(link_task, "nf_link", 12288, NULL, 5, NULL, 0,
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS;
 }
 
 void nf_link_restart(const nf_credentials_t *cred)
@@ -576,10 +632,21 @@ void nf_link_restart(const nf_credentials_t *cred)
 
 bool nf_link_send_frame(const char *frame_json)
 {
-    if (!frame_json || !s_data.connected) {
+    if (!frame_json || !s_data.connected || !s_outbox) {
         return false;
     }
-    return chan_send_frame(&s_data, frame_json);
+    size_t n = strlen(frame_json) + 1U;
+    char *copy = ps_malloc(n);
+    if (!copy) {
+        return false;
+    }
+    memcpy(copy, frame_json, n);
+    if (xQueueSend(s_outbox, &copy, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "uplink queue full; dropping a frame");
+        free(copy);
+        return false;
+    }
+    return true;
 }
 
 char *nf_link_poll(void)
