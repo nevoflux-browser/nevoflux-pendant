@@ -55,6 +55,7 @@ typedef enum {
     BSP_UI_TOUCH_BOOT_MUSE    = 3, /* Launcher card: Boot ota_0 (Muse) */
     BSP_UI_TOUCH_BOOT_NEVO    = 4, /* Launcher card: Boot ota_1 (NevoFlux) */
     BSP_UI_TOUCH_TOGGLE_BLE   = 5, /* Launcher bottom button: open/close BLE provisioning */
+    BSP_UI_TOUCH_TOGGLE_MODE  = 6, /* NevoFlux bottom button: switch the conversation chat <-> agent */
 } bsp_ui_touch_action_t;
 
 /* What the NevoFlux screen animates in its centre (no text during a turn) */
@@ -76,6 +77,7 @@ typedef struct {
     const char *transcript;    /* prompt text, shown only while idle (the font holds just the UI's glyphs) */
     bsp_ui_activity_t activity;
     uint8_t  level;            /* 0..100: mic level while listening, speaker level while speaking */
+    const char *session_mode_label; /* the mode button's text, e.g. "对话模式" / "智能体模式"; NULL = "模式" */
 } bsp_ui_status_t;
 
 bool bsp_display_init(void);

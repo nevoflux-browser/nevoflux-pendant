@@ -22,7 +22,7 @@ extern "C" {
  *                 speech_end / speech_cancel
  *                 user_message {text, voice:true, voice_codec:"opus"}   voice_barge_in {turn_id, played}
  *   down (data):  speech_partial / speech_final / speech_error
- *                 stream_delta / turn_end / error
+ *                 stream_delta / stream_end / turn_end / error
  *                 voice_audio {turn_id, seq, sample_rate, codec:"opus", opus:b64} / voice_done / voice_failed
  *   control:      up {kind:"sync"} {kind:"attach",sessionId}; down {kind:"sessions",rows:[...]}
  */
@@ -99,8 +99,19 @@ int nf_wire_wrap_frame(const char *frame_json, char *out, size_t out_cap);
 #define NF_PTT_MAX_FRAMES_PER_SEG   1000U
 /* Meeting Mode silence threshold: 800ms = 40 frames @ 20ms */
 #define NF_MEETING_SILENCE_FRAMES   40U
-/* turn_end with no voice_audio yet: wait this long for speech before giving up */
-#define NF_VOICE_GRACE_MS           8000ULL
+/*
+ * The answer's text is over (turn_end / stream_end) and no voice_audio yet: wait
+ * this long for speech before giving up. The first sentence lands 1-5 s after
+ * the text with Kokoro and ~9 s with MOSS; a reply the head made text-only
+ * (its voice engine still loading, or voice off) never speaks at all.
+ */
+#define NF_VOICE_GRACE_MS           15000ULL
+/*
+ * Speaker dry this long mid-answer with nothing more arriving: the rest of it
+ * (or its voice_done) was lost on the way, so stop waiting. Longer than the
+ * head takes to synthesise one long sentence at its slowest engine.
+ */
+#define NF_PLAYBACK_STALL_MS        20000ULL
 #define NF_MAX_PENDING_FINALS       8U
 #define NF_ID_CAP                   48U
 
@@ -163,6 +174,8 @@ typedef struct {
     char     barged_turn_id[NF_ID_CAP];
     uint32_t sentences_queued;
     bool     voice_done;
+    bool     speaker_dry;     /* everything received so far has been played */
+    uint64_t dry_since_ms;
     bool     turn_ended;
     uint64_t turn_end_ms;
     uint64_t now_ms;

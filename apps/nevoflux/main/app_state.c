@@ -209,8 +209,17 @@ static void reset_answer(nf_app_ctx_t *app)
     app->turn_id[0] = '\0';
     app->sentences_queued = 0U;
     app->voice_done = false;
+    app->speaker_dry = false;
     app->turn_ended = false;
     app->turn_end_ms = 0ULL;
+}
+
+/* The answer has been spoken (or given up on mid-way): nothing more of it is wanted. */
+static void finish_answer(nf_app_ctx_t *app)
+{
+    reset_answer(app);
+    app->submitted = false;
+    app->state = NF_APP_STATE_IDLE;
 }
 
 /* Stop the answer being spoken, here first and then at the head (barge-in). */
@@ -297,7 +306,7 @@ void nf_app_set_link(nf_app_ctx_t *app, bool up)
          * running dry ends it; sentences of the same turn that arrive after a
          * quick reconnect still play.
          */
-        if (app->state == NF_APP_STATE_PLAYING) {
+        if (app->state == NF_APP_STATE_PLAYING && !app->speaker_dry) {
             app->voice_done = true;
             app->utterance_open = false;
             app->pending_count = 0U;
@@ -326,7 +335,12 @@ void nf_app_tick(nf_app_ctx_t *app, uint64_t now_ms)
     if (app->state == NF_APP_STATE_WAITING_REPLY && app->turn_ended && app->sentences_queued == 0U &&
         now_ms - app->turn_end_ms >= NF_VOICE_GRACE_MS) {
         reset_answer(app);
+        nf_app_prompt(app, "这次没有语音回复\n按住 BOOT 再说一次");
         app->state = NF_APP_STATE_IDLE;
+    }
+    if (app->state == NF_APP_STATE_PLAYING && app->speaker_dry &&
+        now_ms - app->dry_since_ms >= NF_PLAYBACK_STALL_MS) {
+        finish_answer(app);
     }
 }
 
@@ -390,6 +404,7 @@ void nf_app_on_key_event(nf_app_ctx_t *app, bsp_key_event_t ev)
             }
             app->ptt_accum_text[0] = '\0';
             app->pending_count = 0U;
+            app->submitted = false; /* its answer is not wanted, however late */
             app->state = NF_APP_STATE_IDLE;
         }
         break;
@@ -530,6 +545,8 @@ void nf_app_on_stream_delta(nf_app_ctx_t *app, const char *delta)
     /* Only the answer to what this pendant asked; a replayed transcript is not news */
     if (app->state == NF_APP_STATE_WAITING_REPLY || app->state == NF_APP_STATE_PLAYING) {
         show_append(app, delta);
+        /* More text after a stream_end (agent mode: text, a tool, more text) */
+        app->turn_ended = false;
     }
 }
 
@@ -568,7 +585,9 @@ bool nf_app_on_voice_audio(nf_app_ctx_t *app, const char *turn_id, uint32_t seq)
     if (app->barged_turn_id[0] && strcmp(turn_id, app->barged_turn_id) == 0) {
         return false;
     }
-    if (app->state == NF_APP_STATE_WAITING_REPLY && !app->turn_id[0] && app->submitted) {
+    /* Waiting for it, or given up on it but nothing asked since (a late first sentence) */
+    if ((app->state == NF_APP_STATE_WAITING_REPLY || app->state == NF_APP_STATE_IDLE) &&
+        !app->turn_id[0] && app->submitted) {
         snprintf(app->turn_id, sizeof(app->turn_id), "%s", turn_id);
         app->state = NF_APP_STATE_PLAYING;
     }
@@ -576,6 +595,7 @@ bool nf_app_on_voice_audio(nf_app_ctx_t *app, const char *turn_id, uint32_t seq)
         return false;
     }
     app->sentences_queued++;
+    app->speaker_dry = false;
     return true;
 }
 
@@ -586,6 +606,9 @@ void nf_app_on_voice_done(nf_app_ctx_t *app, const char *turn_id)
     }
     if (strcmp(turn_id, app->turn_id) == 0) {
         app->voice_done = true;
+        if (app->state == NF_APP_STATE_PLAYING && app->speaker_dry) {
+            finish_answer(app); /* it all played before this arrived */
+        }
     }
 }
 
@@ -594,21 +617,27 @@ void nf_app_on_voice_failed(nf_app_ctx_t *app, const char *turn_id, const char *
     if (!app) {
         return;
     }
-    if ((app->state == NF_APP_STATE_WAITING_REPLY && !app->turn_id[0]) ||
-        (turn_id && strcmp(turn_id, app->turn_id) == 0)) {
-        show_append(app, "\n（语音合成失败");
-        nf_app_prompt(app, "语音合成失败");
-        if (message && message[0]) {
-            show_append(app, "：");
-            show_append(app, message);
-        }
-        show_append(app, "）");
-        app->voice_done = true;
-        if (app->state == NF_APP_STATE_WAITING_REPLY) {
-            reset_answer(app);
-            app->state = NF_APP_STATE_IDLE;
-        }
+    (void)turn_id;
+    /*
+     * Mid-answer it is one sentence that failed: the head goes on with the next
+     * and ends the turn with voice_done as usual. Only while nothing has been
+     * spoken yet is it the end: the head sends one (with a fresh turn_id) after
+     * stream_end when the reply goes out text-only, e.g. its engine still loading.
+     * Its later sentences, if any, still play (a late first sentence).
+     */
+    if (app->state != NF_APP_STATE_WAITING_REPLY || app->turn_id[0]) {
+        return;
     }
+    show_append(app, "\n（语音合成失败");
+    if (message && message[0]) {
+        show_append(app, "：");
+        show_append(app, message);
+    }
+    show_append(app, "）");
+    nf_app_prompt(app, (message && strstr(message, "warming")) ? "电脑的语音还在启动\n请稍后再说一次"
+                                                             : "语音合成失败");
+    reset_answer(app);
+    app->state = NF_APP_STATE_IDLE;
 }
 
 void nf_app_on_playback_drained(nf_app_ctx_t *app)
@@ -616,8 +645,13 @@ void nf_app_on_playback_drained(nf_app_ctx_t *app)
     if (!app) {
         return;
     }
-    if (app->state == NF_APP_STATE_PLAYING && app->voice_done) {
-        reset_answer(app);
-        app->state = NF_APP_STATE_IDLE;
+    if (app->state != NF_APP_STATE_PLAYING) {
+        return;
     }
+    if (app->voice_done) {
+        finish_answer(app);
+        return;
+    }
+    app->speaker_dry = true;
+    app->dry_since_ms = app->now_ms;
 }

@@ -173,6 +173,68 @@ static void play_voice_opus(const char *opus_b64)
     (void)nf_player_queue_opus(buf, len);
 }
 
+/*
+ * The attached conversation's mode ("chat" / "agent"), as the head last said in
+ * session_state (on attach, and after a set_mode). The mode button flips it.
+ */
+static char     s_sess_mode[8];
+static char     s_mode_req[8];   /* asked for, not yet confirmed */
+static uint64_t s_mode_req_ms;
+#define NF_MODE_CONFIRM_MS 5000ULL
+
+static const char *mode_label(void)
+{
+    if (s_mode_req[0]) {
+        return "切换中…";
+    }
+    if (strcmp(s_sess_mode, "agent") == 0) {
+        return "智能体模式";
+    }
+    if (strcmp(s_sess_mode, "chat") == 0) {
+        return "对话模式";
+    }
+    return NULL;
+}
+
+/* App lock held. */
+static void on_session_state(const char *mode)
+{
+    if (strcmp(mode, "chat") != 0 && strcmp(mode, "agent") != 0) {
+        return;
+    }
+    snprintf(s_sess_mode, sizeof(s_sess_mode), "%s", mode);
+    if (s_mode_req[0]) {
+        nf_app_prompt(&s_app, strcmp(mode, s_mode_req) == 0
+                                  ? (strcmp(mode, "agent") == 0 ? "已切换到智能体模式" : "已切换到对话模式")
+                                  : "模式切换失败");
+        s_mode_req[0] = '\0';
+    }
+}
+
+/* App lock held. The mode button: only between turns, and only with a head. */
+static void toggle_session_mode(bool head_online)
+{
+    if (s_mode_req[0] || s_app.state != NF_APP_STATE_IDLE) {
+        return;
+    }
+    const char *want = strcmp(s_sess_mode, "agent") == 0 ? "chat" : "agent";
+    if (!head_online || !nf_link_request_mode(want)) {
+        nf_app_prompt(&s_app, "未连接电脑，暂时无法切换模式");
+        return;
+    }
+    snprintf(s_mode_req, sizeof(s_mode_req), "%s", want);
+    s_mode_req_ms = (uint64_t)(esp_timer_get_time() / 1000LL);
+}
+
+/* App lock held. */
+static void check_mode_request(void)
+{
+    if (s_mode_req[0] && (uint64_t)(esp_timer_get_time() / 1000LL) - s_mode_req_ms >= NF_MODE_CONFIRM_MS) {
+        s_mode_req[0] = '\0';
+        nf_app_prompt(&s_app, "模式切换失败");
+    }
+}
+
 /* One decrypted data-channel message from the head. */
 static void dispatch(const char *plaintext)
 {
@@ -193,7 +255,7 @@ static void dispatch(const char *plaintext)
         nf_app_on_speech_error(&s_app, jstr(frame, "utterance_id"), jstr(frame, "message"));
     } else if (strcmp(kind, "stream_delta") == 0) {
         nf_app_on_stream_delta(&s_app, jstr(frame, "delta"));
-    } else if (strcmp(kind, "turn_end") == 0) {
+    } else if (strcmp(kind, "turn_end") == 0 || strcmp(kind, "stream_end") == 0) {
         nf_app_on_turn_end(&s_app);
     } else if (strcmp(kind, "error") == 0) {
         nf_app_on_error(&s_app, jstr(frame, "message"));
@@ -211,6 +273,8 @@ static void dispatch(const char *plaintext)
         }
         cJSON_Delete(root);
         return;
+    } else if (strcmp(kind, "session_state") == 0) {
+        on_session_state(jstr(frame, "mode"));
     } else if (strcmp(kind, "voice_done") == 0) {
         nf_app_on_voice_done(&s_app, jstr(frame, "turn_id"));
     } else if (strcmp(kind, "voice_failed") == 0) {
@@ -413,6 +477,14 @@ void app_main(void)
             nf_app_on_key_event(&s_app, BSP_KEY_EVENT_BOOT_DOUBLE_CLICK);
             APP_UNLOCK();
         }
+#if defined(ESP_PLATFORM)
+        APP_LOCK();
+        if (touch == BSP_UI_TOUCH_TOGGLE_MODE) {
+            toggle_session_mode(link_up && head_online);
+        }
+        check_mode_request();
+        APP_UNLOCK();
+#endif
 
         const char *mode_str = "待机";
         bsp_ui_activity_t activity = BSP_UI_ACT_IDLE;
@@ -450,6 +522,9 @@ void app_main(void)
             .activity = activity,
             .level = level,
         };
+#if defined(ESP_PLATFORM)
+        ui_st.session_mode_label = mode_label();
+#endif
         bsp_display_render_nevoflux(&ui_st);
 
 #if defined(ESP_PLATFORM)

@@ -75,6 +75,7 @@ static lv_obj_t *s_lbl_body;
 static lv_obj_t *s_btn_muse;
 static lv_obj_t *s_btn_nevo;
 static lv_obj_t *s_btn_ble;
+static lv_obj_t *s_btn_mode; /* NevoFlux: chat <-> agent */
 static int s_ble_btn_state = -1; /* -1 hidden, 0 off, 1 on (persists across screen rebuilds) */
 static int s_ble_btn_applied = -2;
 /* NevoFlux / status */
@@ -371,7 +372,7 @@ static void build_screen(ui_screen_t which)
     lv_obj_set_style_bg_color(scr, lv_color_hex(UI_COLOR_BG), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-    s_btn_muse = s_btn_nevo = s_btn_ble = s_lbl_mode = s_lbl_flags = NULL;
+    s_btn_muse = s_btn_nevo = s_btn_ble = s_btn_mode = s_lbl_mode = s_lbl_flags = NULL;
     memset(s_bars, 0, sizeof(s_bars));
     memset(s_dots, 0, sizeof(s_dots));
     s_activity_applied = -1;
@@ -416,6 +417,9 @@ static void build_screen(ui_screen_t which)
         lv_obj_align(b1, LV_ALIGN_BOTTOM_MID, -74, -64);
         lv_obj_t *b2 = make_button(scr, "会议", 136, 56, BSP_UI_TOUCH_TOGGLE_MEET);
         lv_obj_align(b2, LV_ALIGN_BOTTOM_MID, 74, -64);
+        /* Below them, where the circle is still ~170 px wide */
+        s_btn_mode = make_button(scr, "模式", 140, 44, BSP_UI_TOUCH_TOGGLE_MODE);
+        lv_obj_align(s_btn_mode, LV_ALIGN_BOTTOM_MID, 0, -14);
     } else {
         s_lbl_mode = make_label(scr, &nf_font_20, UI_COLOR_ACCENT, 300);
         lv_obj_align(s_lbl_mode, LV_ALIGN_TOP_MID, 0, 150);
@@ -540,6 +544,10 @@ void bsp_display_render_nevoflux(const bsp_ui_status_t *status)
     set_text_if_changed(s_lbl_flags, flags);
     set_text_if_changed(s_lbl_mode, status->mode_label ? status->mode_label : "");
     set_text_if_changed(s_lbl_body, status->transcript ? status->transcript : "");
+    if (s_btn_mode) {
+        set_text_if_changed(lv_obj_get_child(s_btn_mode, 0),
+                            status->session_mode_label ? status->session_mode_label : "模式");
+    }
     apply_activity(status->activity);
     if (status->activity == BSP_UI_ACT_LISTENING || status->activity == BSP_UI_ACT_SPEAKING ||
         status->activity == BSP_UI_ACT_MEETING) {

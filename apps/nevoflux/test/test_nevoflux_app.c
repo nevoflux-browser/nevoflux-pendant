@@ -339,7 +339,29 @@ static void test_text_only_answer_times_out(void)
     assert(app.state == NF_APP_STATE_WAITING_REPLY);
     nf_app_tick(&app, 1000ULL + NF_VOICE_GRACE_MS);
     assert(app.state == NF_APP_STATE_IDLE);
-    printf("[PASS] a turn that ends without voice returns to idle\n");
+    assert(strstr(app.screen_prompt, "没有语音回复"));
+    /* ...and if its voice turns up after all, it still plays */
+    assert(nf_app_on_voice_audio(&app, "vt_late", 0));
+    assert(app.state == NF_APP_STATE_PLAYING);
+
+    /* More text after a stream_end keeps it waiting (agent mode: text, tool, text) */
+    new_app(&app);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    feed(&app, 20, true);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
+    nf_app_on_speech_final(&app, app.pending[0].id, "查一下", true);
+    nf_app_tick(&app, 1000ULL);
+    nf_app_on_turn_end(&app);
+    nf_app_tick(&app, 5000ULL);
+    nf_app_on_stream_delta(&app, "找到了");
+    nf_app_tick(&app, 1000ULL + NF_VOICE_GRACE_MS + 10ULL);
+    assert(app.state == NF_APP_STATE_WAITING_REPLY);
+
+    /* A turn cancelled with PWR: its late voice is not played */
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_PWR_CLICK);
+    assert(app.state == NF_APP_STATE_IDLE);
+    assert(!nf_app_on_voice_audio(&app, "vt_cancelled", 0));
+    printf("[PASS] a turn that ends without voice returns to idle; late voice still plays\n");
 }
 
 static void test_link_drop_lets_the_answer_finish(void)
@@ -382,6 +404,74 @@ static void test_link_drop_lets_the_answer_finish(void)
     nf_app_set_link(&app, false);
     assert(app.state == NF_APP_STATE_IDLE);
     printf("[PASS] a dropped link lets the answer already here finish\n");
+}
+
+/* Start a turn and get one sentence of its answer playing */
+static void answer_playing(nf_app_ctx_t *app, const char *turn)
+{
+    nf_app_on_key_event(app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    feed(app, 20, true);
+    nf_app_on_key_event(app, BSP_KEY_EVENT_BOOT_RELEASE);
+    nf_app_on_speech_final(app, app->pending[0].id, "问题", true);
+    assert(nf_app_on_voice_audio(app, turn, 0));
+    assert(app->state == NF_APP_STATE_PLAYING);
+}
+
+static void test_playing_always_ends(void)
+{
+    static nf_app_ctx_t app;
+    new_app(&app);
+
+    /* voice_done after the speaker already ran dry */
+    answer_playing(&app, "vt_1");
+    nf_app_tick(&app, 1000ULL);
+    nf_app_on_playback_drained(&app);
+    assert(app.state == NF_APP_STATE_PLAYING); /* more may come */
+    nf_app_on_voice_done(&app, "vt_1");
+    assert(app.state == NF_APP_STATE_IDLE);
+    assert(!nf_app_on_voice_audio(&app, "vt_other", 0)); /* spoken and done: nothing late */
+
+    /* The link drops after the speaker ran dry */
+    answer_playing(&app, "vt_2");
+    nf_app_on_playback_drained(&app);
+    nf_app_set_link(&app, false);
+    assert(app.state == NF_APP_STATE_IDLE);
+    nf_app_set_link(&app, true);
+
+    /* The rest of the answer is lost on the way: give up after a stall */
+    answer_playing(&app, "vt_3");
+    nf_app_tick(&app, 5000ULL);
+    nf_app_on_playback_drained(&app);
+    nf_app_tick(&app, 5000ULL + NF_PLAYBACK_STALL_MS - 1ULL);
+    assert(app.state == NF_APP_STATE_PLAYING);
+    /* a late sentence restarts the wait */
+    assert(nf_app_on_voice_audio(&app, "vt_3", 1));
+    nf_app_tick(&app, 5000ULL + NF_PLAYBACK_STALL_MS + 10ULL);
+    assert(app.state == NF_APP_STATE_PLAYING);
+    nf_app_on_playback_drained(&app);
+    nf_app_tick(&app, 5000ULL + 2ULL * NF_PLAYBACK_STALL_MS + 20ULL);
+    assert(app.state == NF_APP_STATE_IDLE);
+
+    /* One sentence failing mid-answer does not end it */
+    answer_playing(&app, "vt_4");
+    nf_app_on_voice_failed(&app, "vt_4", "sentence synthesis failed");
+    nf_app_on_playback_drained(&app);
+    assert(app.state == NF_APP_STATE_PLAYING);
+    assert(nf_app_on_voice_audio(&app, "vt_4", 2));
+    nf_app_on_voice_done(&app, "vt_4");
+    nf_app_on_playback_drained(&app);
+    assert(app.state == NF_APP_STATE_IDLE);
+
+    /* A text-only reply: voice_failed (fresh turn_id) right after stream_end ends the wait */
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    feed(&app, 20, true);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
+    nf_app_on_speech_final(&app, app.pending[0].id, "你好", true);
+    nf_app_on_turn_end(&app);
+    nf_app_on_voice_failed(&app, "vt_fresh", "voice engine warming up");
+    assert(app.state == NF_APP_STATE_IDLE);
+    assert(strstr(app.screen_prompt, "还在启动"));
+    printf("[PASS] playing always ends: late voice_done, drop after drain, lost tail\n");
 }
 
 static void test_reply_wav_to_16k(void)
@@ -429,6 +519,7 @@ int main(void)
     test_barge_in_and_meeting();
     test_text_only_answer_times_out();
     test_link_drop_lets_the_answer_finish();
+    test_playing_always_ends();
     test_reply_wav_to_16k();
     printf("[PASS] All NevoFlux app unit tests passed!\n");
     return 0;

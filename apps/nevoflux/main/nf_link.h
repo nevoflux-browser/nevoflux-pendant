@@ -57,6 +57,14 @@ void nf_link_free(char *msg);
 
 void nf_link_get_status(nf_link_status_t *out);
 
+/**
+ * Ask the head to switch the attached conversation to `mode` ("chat" or
+ * "agent"). Sent on the control channel by the link task. There is no ack: the
+ * head confirms with a `session_state` frame on the data channel, and none
+ * within a few seconds means it did not happen. False if nothing is attached.
+ */
+bool nf_link_request_mode(const char *mode);
+
 #ifdef __cplusplus
 }
 #endif

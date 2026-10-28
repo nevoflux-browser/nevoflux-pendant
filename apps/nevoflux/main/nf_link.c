@@ -31,7 +31,12 @@ static const char *TAG = "nf_link";
 #define NF_OUTBOX_DEPTH        32
 #define NF_LAN_PROBE_MS        1500
 #define NF_LAN_REPROBE_MS      (2U * 60U * 1000U)
-#define NF_SILENT_DEADLINE_MS  (90U * 1000U)
+/*
+ * A healthy socket hears at least the relay's "pong" every 30 s. Paths to the
+ * relay go half-dead (sends still accepted, nothing comes back) before they are
+ * reset, and a reply sent into one is lost: notice within 1.5 intervals.
+ */
+#define NF_SILENT_DEADLINE_MS  (45U * 1000U)
 #define NF_BACKOFF_MIN_MS      1000U
 #define NF_BACKOFF_MAX_MS      60000U
 
@@ -61,6 +66,7 @@ static nf_chan_t         s_ctl = {.is_data = false, .peers = -1};
 static nf_chan_t         s_data = {.is_data = true, .peers = -1};
 static nf_link_status_t  s_status;
 static char              s_attached_session[96];
+static char              s_pending_mode[8];   /* set_mode for the link task to send */
 
 static uint64_t now_ms(void)
 {
@@ -236,11 +242,11 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *event_d
     case WEBSOCKET_EVENT_ERROR:
         if (ch->connected) {
             uint64_t t = now_ms();
-            ESP_LOGW(TAG, "%s socket %s after %us up, %ums since data, %u B in, errno %d",
+            ESP_LOGW(TAG, "%s socket %s after %us up, %ums since data, %u B in",
                      ch->is_data ? "data" : "control",
                      id == WEBSOCKET_EVENT_CLOSED ? "closed" : (id == WEBSOCKET_EVENT_ERROR ? "error" : "dropped"),
                      (unsigned)((t - ch->up_ms) / 1000ULL), (unsigned)ms_since(t, ch->last_rx_ms),
-                     (unsigned)ch->rx_bytes, d ? d->error_handle.esp_transport_sock_errno : 0);
+                     (unsigned)ch->rx_bytes);
         }
         ch->connected = false;
         break;
@@ -313,7 +319,7 @@ static bool chan_open(nf_chan_t *ch, const char *url, bool tls)
         .disable_auto_reconnect = true,
         .network_timeout_ms = 10000,
         .ping_interval_sec = 30,
-        .pingpong_timeout_sec = 90,
+        .pingpong_timeout_sec = 45,
         .user_agent = NF_HTTP_USER_AGENT,
     };
     if (tls) {
@@ -551,6 +557,20 @@ static void link_task(void *arg)
             /* On the relay the head is there when the relay says so; it pushes a
              * peers notice when it arrives, so an empty channel is just held open
              * (an idle socket costs nothing) rather than redialled. */
+            char mode[sizeof(s_pending_mode)];
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            snprintf(mode, sizeof(mode), "%s", s_pending_mode);
+            s_pending_mode[0] = '\0';
+            xSemaphoreGive(s_lock);
+            if (mode[0] && s_attached_session[0]) {
+                char json[192];
+                snprintf(json, sizeof(json), "{\"kind\":\"set_mode\",\"sessionId\":\"%.100s\",\"mode\":\"%s\"}",
+                         s_attached_session, mode);
+                ESP_LOGI(TAG, "asking the head for %s mode", mode);
+                if (!chan_send_frame(&s_ctl, json)) {
+                    ESP_LOGW(TAG, "set_mode not sent");
+                }
+            }
             bool online = lan ? true : (s_data.peers > 0);
             xSemaphoreTake(s_lock, portMAX_DELAY);
             s_status.data_up = true;
@@ -692,4 +712,18 @@ void nf_link_get_status(nf_link_status_t *out)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     *out = s_status;
     xSemaphoreGive(s_lock);
+}
+
+bool nf_link_request_mode(const char *mode)
+{
+    if (!s_lock || !mode || (strcmp(mode, "chat") != 0 && strcmp(mode, "agent") != 0)) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool ok = s_status.attached;
+    if (ok) {
+        snprintf(s_pending_mode, sizeof(s_pending_mode), "%s", mode);
+    }
+    xSemaphoreGive(s_lock);
+    return ok;
 }
