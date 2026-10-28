@@ -41,6 +41,8 @@ static i2s_chan_handle_t s_rx_chan;
 static esp_codec_dev_handle_t s_play_dev;
 static esp_codec_dev_handle_t s_rec_dev;
 static bool s_play_open;
+/* PA pin as last set; the codec stays open while it is off between sentences */
+static bool s_pa_on;
 static bool s_rec_open;
 static uint32_t s_play_rate;
 
@@ -207,6 +209,7 @@ static bool play_open_locked(uint32_t rate)
     (void)esp_codec_dev_set_out_vol(s_play_dev, CONFIG_BSP_AUDIO_SPK_VOLUME);
     s_play_open = true;
     s_play_rate = rate;
+    s_pa_on = true; /* the ES8311 driver raised the PA pin on open */
     return true;
 }
 
@@ -215,6 +218,7 @@ static void play_close_locked(void)
     if (s_play_open) {
         (void)esp_codec_dev_close(s_play_dev);
         s_play_open = false;
+        s_pa_on = false;
     }
 }
 
@@ -323,6 +327,26 @@ bool bsp_audio_restore_capture_16k(void)
     return true;
 }
 
+bool bsp_audio_spk_idle(void)
+{
+#if defined(ESP_PLATFORM)
+    if (!s_play_dev) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool keep = s_play_open && s_play_rate == BSP_AUDIO_DEFAULT_MIC_RATE && s_rec_open;
+    if (keep && s_pa_on) {
+        gpio_set_level(BSP_PIN_PA_CTRL, 0); /* no hiss while listening */
+        s_pa_on = false;
+    }
+    xSemaphoreGive(s_lock);
+    if (keep) {
+        return true;
+    }
+#endif
+    return bsp_audio_restore_capture_16k();
+}
+
 bool bsp_audio_read_mic(int16_t *pcm_out, size_t samples_to_read, size_t *out_samples_read, uint32_t timeout_ms)
 {
     if (!pcm_out || !out_samples_read || samples_to_read == 0U) {
@@ -373,6 +397,10 @@ bool bsp_audio_write_spk(const int16_t *pcm_in, size_t samples_to_write, size_t 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     bool ok = play_open_locked(s_play_open ? s_play_rate : s_current_sample_rate) &&
               scratch_reserve(samples_to_write * 2U);
+    if (ok && !s_pa_on) {
+        gpio_set_level(BSP_PIN_PA_CTRL, 1);
+        s_pa_on = true;
+    }
     if (ok) {
         for (size_t i = 0; i < samples_to_write; ++i) {
             s_scratch[2U * i] = pcm_in[i]; /* ES8311 is mono: feed the sample to both slots */

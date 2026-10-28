@@ -47,6 +47,7 @@ static const sh8601_lcd_init_cmd_t s_co5300_init_cmds[] = {
 #define UI_COLOR_OK      0x3DDC84
 #define UI_COLOR_WARN    0xFFB020
 #define UI_COLOR_CARD    0x1A1C22
+#define UI_COLOR_REC     0xFF4D4F
 
 #define UI_TEXT_WIDTH    330 /* keeps wrapped text inside the round glass */
 
@@ -79,6 +80,17 @@ static int s_ble_btn_applied = -2;
 /* NevoFlux / status */
 static lv_obj_t *s_lbl_mode;
 static lv_obj_t *s_lbl_flags;
+/* NevoFlux activity animation: level bars, or thinking dots */
+#define UI_BARS          5
+#define UI_DOTS          3
+#define UI_BAR_W         20
+#define UI_BAR_MIN_H     16
+#define UI_BAR_MAX_H     120
+#define UI_ANIM_Y        (-24)
+static lv_obj_t *s_bars[UI_BARS];
+static int32_t   s_bar_h[UI_BARS];
+static lv_obj_t *s_dots[UI_DOTS];
+static int       s_activity_applied = -1;
 
 
 static void set_text_if_changed(lv_obj_t *lbl, const char *text)
@@ -258,6 +270,96 @@ static lv_obj_t *make_button(lv_obj_t *parent, const char *text, int32_t w, int3
     return btn;
 }
 
+static lv_obj_t *make_blob(lv_obj_t *parent, int32_t w, int32_t h)
+{
+    lv_obj_t *o = lv_obj_create(parent);
+    lv_obj_remove_style_all(o);
+    lv_obj_set_size(o, w, h);
+    lv_obj_set_style_radius(o, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+    return o;
+}
+
+static void dot_bounce_cb(void *obj, int32_t v)
+{
+    lv_obj_set_style_translate_y((lv_obj_t *)obj, v, 0);
+}
+
+/* Lock held. Show what `act` animates and hide the rest; the text is idle-only. */
+static void apply_activity(bsp_ui_activity_t act)
+{
+    if (s_activity_applied == (int)act) {
+        return;
+    }
+    s_activity_applied = (int)act;
+    const bool bars = act == BSP_UI_ACT_LISTENING || act == BSP_UI_ACT_SPEAKING || act == BSP_UI_ACT_MEETING;
+    const uint32_t color = act == BSP_UI_ACT_SPEAKING ? UI_COLOR_OK
+                         : act == BSP_UI_ACT_MEETING  ? UI_COLOR_REC
+                                                      : UI_COLOR_ACCENT;
+    for (int i = 0; i < UI_BARS; ++i) {
+        lv_obj_set_style_bg_color(s_bars[i], lv_color_hex(color), 0);
+        s_bar_h[i] = UI_BAR_MIN_H;
+        lv_obj_set_height(s_bars[i], UI_BAR_MIN_H);
+        if (bars) {
+            lv_obj_remove_flag(s_bars[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_bars[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    for (int i = 0; i < UI_DOTS; ++i) {
+        lv_anim_delete(s_dots[i], dot_bounce_cb);
+        lv_obj_set_style_translate_y(s_dots[i], 0, 0);
+        if (act != BSP_UI_ACT_THINKING) {
+            lv_obj_add_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        lv_obj_remove_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN);
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, s_dots[i]);
+        lv_anim_set_exec_cb(&a, dot_bounce_cb);
+        lv_anim_set_values(&a, 0, -30);
+        lv_anim_set_duration(&a, 360);
+        lv_anim_set_playback_duration(&a, 360);
+        lv_anim_set_repeat_delay(&a, 300);
+        lv_anim_set_delay(&a, (uint32_t)i * 180U);
+        lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_start(&a);
+    }
+    if (act == BSP_UI_ACT_IDLE) {
+        lv_obj_align(s_lbl_mode, LV_ALIGN_CENTER, 0, -30);
+        lv_obj_remove_flag(s_lbl_body, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_align(s_lbl_mode, LV_ALIGN_CENTER, 0, UI_ANIM_Y + UI_BAR_MAX_H / 2 + 36);
+        lv_obj_add_flag(s_lbl_body, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* Lock held. Bars follow `level` (0..100), shaped high in the middle and
+ * wobbling a little out of step so a steady voice still looks alive. */
+static void update_bars(uint8_t level)
+{
+    static const int32_t shape[UI_BARS] = {55, 80, 100, 80, 55};
+    const uint32_t t = lv_tick_get();
+    const int32_t lvl = level > 100U ? 100 : (int32_t)level;
+    for (int i = 0; i < UI_BARS; ++i) {
+        int32_t wobble = lv_trigo_sin((int16_t)((t / 3U + (uint32_t)i * 75U) % 360U)); /* +-32767 */
+        int32_t amp = lvl * shape[i] / 100;
+        amp = amp * (85 + wobble * 15 / 32767) / 100;
+        int32_t target = UI_BAR_MIN_H + (UI_BAR_MAX_H - UI_BAR_MIN_H) * amp / 100;
+        /* Rise fast, fall slower */
+        int32_t cur = s_bar_h[i];
+        cur += (target > cur) ? (target - cur) / 2 : (target - cur) / 5;
+        if (cur != s_bar_h[i]) {
+            s_bar_h[i] = cur;
+            lv_obj_set_height(s_bars[i], cur);
+        }
+    }
+}
+
 /* Must be called with the LVGL lock held. */
 static void build_screen(ui_screen_t which)
 {
@@ -270,6 +372,9 @@ static void build_screen(ui_screen_t which)
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     s_btn_muse = s_btn_nevo = s_btn_ble = s_lbl_mode = s_lbl_flags = NULL;
+    memset(s_bars, 0, sizeof(s_bars));
+    memset(s_dots, 0, sizeof(s_dots));
+    s_activity_applied = -1;
     s_ble_btn_applied = -2;
 
     s_lbl_title = make_label(scr, &nf_font_32, UI_COLOR_FG, 0);
@@ -298,6 +403,15 @@ static void build_screen(ui_screen_t which)
         lv_obj_align(s_lbl_mode, LV_ALIGN_CENTER, 0, -30);
         s_lbl_body = make_label(scr, &nf_font_20, UI_COLOR_FG, UI_TEXT_WIDTH);
         lv_obj_align(s_lbl_body, LV_ALIGN_CENTER, 0, 40);
+        for (int i = 0; i < UI_BARS; ++i) {
+            s_bars[i] = make_blob(scr, UI_BAR_W, UI_BAR_MIN_H);
+            lv_obj_align(s_bars[i], LV_ALIGN_CENTER, (i - UI_BARS / 2) * 36, UI_ANIM_Y);
+        }
+        for (int i = 0; i < UI_DOTS; ++i) {
+            s_dots[i] = make_blob(scr, 28, 28);
+            lv_obj_set_style_bg_color(s_dots[i], lv_color_hex(UI_COLOR_WARN), 0);
+            lv_obj_align(s_dots[i], LV_ALIGN_CENTER, (i - UI_DOTS / 2) * 48, UI_ANIM_Y + 14);
+        }
         lv_obj_t *b1 = make_button(scr, "切换系统", 136, 56, BSP_UI_TOUCH_SWITCH_SYS);
         lv_obj_align(b1, LV_ALIGN_BOTTOM_MID, -74, -64);
         lv_obj_t *b2 = make_button(scr, "会议", 136, 56, BSP_UI_TOUCH_TOGGLE_MEET);
@@ -426,6 +540,11 @@ void bsp_display_render_nevoflux(const bsp_ui_status_t *status)
     set_text_if_changed(s_lbl_flags, flags);
     set_text_if_changed(s_lbl_mode, status->mode_label ? status->mode_label : "");
     set_text_if_changed(s_lbl_body, status->transcript ? status->transcript : "");
+    apply_activity(status->activity);
+    if (status->activity == BSP_UI_ACT_LISTENING || status->activity == BSP_UI_ACT_SPEAKING ||
+        status->activity == BSP_UI_ACT_MEETING) {
+        update_bars(status->level);
+    }
     lvgl_port_unlock();
 #endif
 }

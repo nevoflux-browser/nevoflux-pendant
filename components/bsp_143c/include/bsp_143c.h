@@ -31,6 +31,15 @@ bool bsp_audio_set_play_sample_rate(uint32_t sample_rate_hz);
  */
 bool bsp_audio_restore_capture_16k(void);
 
+/**
+ * The speaker has nothing to play for now. At 16 kHz (the mic's rate) the
+ * ES8311 stays open and only the PA is switched off — reopening the codec
+ * between the sentences of one answer is a reset sequence each time, and
+ * re-running it is what left later sentences silent. At any other rate it
+ * is `bsp_audio_restore_capture_16k`. The next write turns the PA back on.
+ */
+bool bsp_audio_spk_idle(void);
+
 bool bsp_audio_read_mic(int16_t *pcm_out, size_t samples_to_read, size_t *out_samples_read, uint32_t timeout_ms);
 bool bsp_audio_write_spk(const int16_t *pcm_in, size_t samples_to_write, size_t *out_samples_written, uint32_t timeout_ms);
 void bsp_audio_set_pa_enable(bool enable);
@@ -48,6 +57,15 @@ typedef enum {
     BSP_UI_TOUCH_TOGGLE_BLE   = 5, /* Launcher bottom button: open/close BLE provisioning */
 } bsp_ui_touch_action_t;
 
+/* What the NevoFlux screen animates in its centre (no text during a turn) */
+typedef enum {
+    BSP_UI_ACT_IDLE = 0,   /* mode label + the prompt text */
+    BSP_UI_ACT_LISTENING,  /* blue bars following the mic level */
+    BSP_UI_ACT_THINKING,   /* three amber dots bouncing in turn */
+    BSP_UI_ACT_SPEAKING,   /* green bars following the speaker level */
+    BSP_UI_ACT_MEETING,    /* red bars following the mic level */
+} bsp_ui_activity_t;
+
 typedef struct {
     bool     wifi_connected;
     bool     relay_connected;
@@ -55,7 +73,9 @@ typedef struct {
     const char *link_label;    /* transport name for the status line: "局域网" / "Relay"; NULL = "Relay" */
     uint8_t  battery_percent;  /* 0..100 */
     const char *mode_label;    /* e.g. "待机", "聆听中…", "思考中…", "播报中…", "会议录音中" */
-    const char *transcript;    /* UTF-8 partial/final transcript or prompt */
+    const char *transcript;    /* prompt text, shown only while idle (the font holds just the UI's glyphs) */
+    bsp_ui_activity_t activity;
+    uint8_t  level;            /* 0..100: mic level while listening, speaker level while speaking */
 } bsp_ui_status_t;
 
 bool bsp_display_init(void);

@@ -18,11 +18,12 @@ extern "C" {
  * (nonce(12) || ciphertext || tag(16)) under the channel key, as one binary
  * WebSocket message — over the relay, or straight to the head on the LAN.
  *
- *   up   (data):  speech_start / speech_chunk / speech_end / speech_cancel
- *                 user_message {text, voice:true}   voice_barge_in {turn_id, played}
+ *   up   (data):  speech_start {codec:"opus", frame_ms:20} / speech_chunk {opus:b64}
+ *                 speech_end / speech_cancel
+ *                 user_message {text, voice:true, voice_codec:"opus"}   voice_barge_in {turn_id, played}
  *   down (data):  speech_partial / speech_final / speech_error
  *                 stream_delta / turn_end / error
- *                 voice_audio {turn_id, seq, sample_rate, wav:b64} / voice_done / voice_failed
+ *                 voice_audio {turn_id, seq, sample_rate, codec:"opus", opus:b64} / voice_done / voice_failed
  *   control:      up {kind:"sync"} {kind:"attach",sessionId}; down {kind:"sessions",rows:[...]}
  */
 
@@ -90,6 +91,8 @@ int nf_wire_wrap_frame(const char *frame_json, char *out, size_t out_cap);
 #define NF_CHUNK_FRAMES             10U
 #define NF_CHUNK_PCM_BYTES          (NF_CHUNK_FRAMES * NF_PCM_BYTES_PER_FRAME)
 #define NF_CHUNK_JSON_CAP           (NF_CHUNK_PCM_BYTES * 4U / 3U + 160U)
+/* Largest Opus packet kept for one 20 ms frame; at 24 kbit/s they run ~60 B */
+#define NF_OPUS_MAX_PACKET          400U
 /* Shorter than this at release is a tap, not speech */
 #define NF_MIN_UTTERANCE_FRAMES     15U
 /* Auto-split long Push-to-Talk utterances at >20s (1000 frames) on VAD silence */
@@ -118,6 +121,13 @@ typedef struct {
     void (*send_frame)(const char *frame_json, void *ctx);
     /* Drop everything queued for the speaker, right now (barge-in / cancel) */
     void (*stop_playback)(void *ctx);
+    /*
+     * Optional uplink compression. Encode one 20 ms frame into `out`, returning
+     * the packet length (0 = failed, the frame is skipped). NULL sends raw PCM.
+     * `encode_reset` runs at the start of every utterance.
+     */
+    size_t (*encode_frame)(const int16_t *pcm, uint8_t *out, size_t cap, void *ctx);
+    void (*encode_reset)(void *ctx);
     void *ctx;
 } nf_app_io_t;
 
@@ -134,8 +144,9 @@ typedef struct {
     uint32_t segment_frames;
     uint32_t press_frames;
     uint32_t consecutive_silence_frames;
-    uint8_t  chunk_pcm[NF_CHUNK_PCM_BYTES];
+    uint8_t  chunk_pcm[NF_CHUNK_PCM_BYTES]; /* raw PCM, or (u16 LE length + Opus packet) x n */
     size_t   chunk_len;
+    uint32_t chunk_frames;
 
     /* Utterances of this press, in order, until every speech_final is in */
     struct {
@@ -157,11 +168,17 @@ typedef struct {
     uint64_t now_ms;
 
     char ptt_accum_text[1024];
+    /* What was said and answered (kept for logs/tests; the screen does not show it) */
     char screen_transcript[1024];
+    /* Status prompt for the idle screen, only from the UI's own strings
+     * (its font carries just those glyphs). "" = the default hint. */
+    char screen_prompt[192];
     char json_scratch[NF_CHUNK_JSON_CAP];
 } nf_app_ctx_t;
 
 void nf_app_init(nf_app_ctx_t *app, uint32_t boot_nonce, const nf_app_io_t *io);
+/** Set the idle-screen prompt (NULL or "" = the default hint). */
+void nf_app_prompt(nf_app_ctx_t *app, const char *text);
 void nf_app_set_link(nf_app_ctx_t *app, bool up);
 void nf_app_tick(nf_app_ctx_t *app, uint64_t now_ms);
 

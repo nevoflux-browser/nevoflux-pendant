@@ -13,6 +13,11 @@ static void send_frame(nf_app_ctx_t *app, const char *json)
 
 static void show_append(nf_app_ctx_t *app, const char *text);
 
+void nf_app_prompt(nf_app_ctx_t *app, const char *text)
+{
+    snprintf(app->screen_prompt, sizeof(app->screen_prompt), "%s", text ? text : "");
+}
+
 static void show(nf_app_ctx_t *app, const char *text)
 {
     app->screen_transcript[0] = '\0';
@@ -102,8 +107,9 @@ static void flush_chunk(nf_app_ctx_t *app)
         return;
     }
     int n = snprintf(app->json_scratch, sizeof(app->json_scratch),
-                     "{\"kind\":\"speech_chunk\",\"utterance_id\":\"%s\",\"seq\":%u,\"pcm\":\"",
-                     app->utterance_id, (unsigned)app->chunk_seq);
+                     "{\"kind\":\"speech_chunk\",\"utterance_id\":\"%s\",\"seq\":%u,\"%s\":\"",
+                     app->utterance_id, (unsigned)app->chunk_seq,
+                     app->io.encode_frame ? "opus" : "pcm");
     if (n > 0 && (size_t)n < sizeof(app->json_scratch)) {
         size_t b = nf_b64_encode(app->chunk_pcm, app->chunk_len,
                                  app->json_scratch + n, sizeof(app->json_scratch) - (size_t)n);
@@ -116,6 +122,7 @@ static void flush_chunk(nf_app_ctx_t *app)
     /* seq advances even if the frame was dropped: the head counts the hole in `gaps` */
     app->chunk_seq++;
     app->chunk_len = 0U;
+    app->chunk_frames = 0U;
 }
 
 static void start_utterance(nf_app_ctx_t *app)
@@ -125,13 +132,17 @@ static void start_utterance(nf_app_ctx_t *app)
     app->utterance_open = true;
     app->chunk_seq = 0U;
     app->chunk_len = 0U;
+    app->chunk_frames = 0U;
     app->segment_frames = 0U;
     app->consecutive_silence_frames = 0U;
 
-    char json[160];
+    if (app->io.encode_reset) {
+        app->io.encode_reset(app->io.ctx);
+    }
+    char json[192];
     snprintf(json, sizeof(json),
-             "{\"kind\":\"speech_start\",\"utterance_id\":\"%s\",\"sample_rate\":16000}",
-             app->utterance_id);
+             "{\"kind\":\"speech_start\",\"utterance_id\":\"%s\",\"sample_rate\":16000%s}",
+             app->utterance_id, app->io.encode_frame ? ",\"codec\":\"opus\",\"frame_ms\":20" : "");
     send_frame(app, json);
 }
 
@@ -160,17 +171,35 @@ static void cancel_utterance(nf_app_ctx_t *app, const char *reason)
     send_frame(app, json);
     app->utterance_open = false;
     app->chunk_len = 0U;
+    app->chunk_frames = 0U;
 }
 
 static void push_frame(nf_app_ctx_t *app, const uint8_t *pcm)
 {
-    if (app->chunk_len + NF_PCM_BYTES_PER_FRAME > sizeof(app->chunk_pcm)) {
-        flush_chunk(app);
-    }
-    memcpy(app->chunk_pcm + app->chunk_len, pcm, NF_PCM_BYTES_PER_FRAME);
-    app->chunk_len += NF_PCM_BYTES_PER_FRAME;
     app->segment_frames++;
-    if (app->chunk_len >= sizeof(app->chunk_pcm)) {
+    if (app->io.encode_frame) {
+        /* One chunk per NF_CHUNK_FRAMES either way; Opus just makes it ~10x smaller */
+        if (app->chunk_len + 2U + NF_OPUS_MAX_PACKET > sizeof(app->chunk_pcm)) {
+            flush_chunk(app);
+        }
+        int16_t samples[NF_PCM_SAMPLES_PER_FRAME];
+        memcpy(samples, pcm, sizeof(samples));
+        size_t n = app->io.encode_frame(samples, app->chunk_pcm + app->chunk_len + 2U,
+                                        NF_OPUS_MAX_PACKET, app->io.ctx);
+        if (n > 0U && n <= NF_OPUS_MAX_PACKET) {
+            app->chunk_pcm[app->chunk_len] = (uint8_t)(n & 0xFFU);
+            app->chunk_pcm[app->chunk_len + 1U] = (uint8_t)(n >> 8);
+            app->chunk_len += 2U + n;
+        }
+    } else {
+        if (app->chunk_len + NF_PCM_BYTES_PER_FRAME > sizeof(app->chunk_pcm)) {
+            flush_chunk(app);
+        }
+        memcpy(app->chunk_pcm + app->chunk_len, pcm, NF_PCM_BYTES_PER_FRAME);
+        app->chunk_len += NF_PCM_BYTES_PER_FRAME;
+    }
+    app->chunk_frames++;
+    if (app->chunk_frames >= NF_CHUNK_FRAMES) {
         flush_chunk(app);
     }
 }
@@ -234,6 +263,7 @@ static void maybe_complete_ptt(nf_app_ctx_t *app)
         submit_turn(app);
     } else {
         show(app, "没听清，请按住 BOOT 再说一次");
+        nf_app_prompt(app, "没听清，请按住 BOOT 再说一次");
         app->state = NF_APP_STATE_IDLE;
     }
 }
@@ -260,16 +290,27 @@ void nf_app_set_link(nf_app_ctx_t *app, bool up)
     }
     app->link_up = up;
     if (!up) {
-        /* Whatever was in flight is gone with the socket */
-        if (app->state == NF_APP_STATE_PLAYING && app->io.stop_playback) {
-            app->io.stop_playback(app->io.ctx);
+        /*
+         * The relay resets sockets every few minutes on some networks. The head
+         * synthesises ahead of the speaker, so most of an answer is usually
+         * already queued here: let it finish. No voice_done will follow, so
+         * running dry ends it; sentences of the same turn that arrive after a
+         * quick reconnect still play.
+         */
+        if (app->state == NF_APP_STATE_PLAYING) {
+            app->voice_done = true;
+            app->utterance_open = false;
+            app->pending_count = 0U;
+            return;
         }
+        /* Whatever else was in flight is gone with the socket */
         app->utterance_open = false;
         app->pending_count = 0U;
         app->ptt_accum_text[0] = '\0';
         reset_answer(app);
         if (app->state != NF_APP_STATE_IDLE) {
             show(app, "与电脑的连接断开了");
+            nf_app_prompt(app, "与电脑的连接断开了");
         }
         app->state = NF_APP_STATE_IDLE;
     }
@@ -298,7 +339,16 @@ void nf_app_on_key_event(nf_app_ctx_t *app, bsp_key_event_t ev)
     switch (ev) {
     case BSP_KEY_EVENT_BOOT_PRESS_START:
         if (!app->link_up) {
+            if (app->state == NF_APP_STATE_PLAYING) {
+                /* Still a way to stop the answer; the head is told nothing */
+                if (app->io.stop_playback) {
+                    app->io.stop_playback(app->io.ctx);
+                }
+                reset_answer(app);
+                app->state = NF_APP_STATE_IDLE;
+            }
             show(app, "未连接电脑，暂时无法对话");
+            nf_app_prompt(app, "未连接电脑，暂时无法对话");
             return;
         }
         if (app->state == NF_APP_STATE_PLAYING ||
@@ -313,6 +363,7 @@ void nf_app_on_key_event(nf_app_ctx_t *app, bsp_key_event_t ev)
         app->press_frames = 0U;
         app->submitted = false;
         show(app, "");
+        nf_app_prompt(app, NULL);
         start_utterance(app);
         break;
 
@@ -354,6 +405,7 @@ void nf_app_on_key_event(nf_app_ctx_t *app, bsp_key_event_t ev)
             app->consecutive_silence_frames = 0U;
             app->pending_count = 0U;
             show(app, "会议录音中…\n");
+            nf_app_prompt(app, NULL);
         }
         break;
 
@@ -461,6 +513,7 @@ void nf_app_on_speech_error(nf_app_ctx_t *app, const char *utterance_id, const c
             char line[256];
             snprintf(line, sizeof(line), "语音识别失败：%s", message ? message : "");
             show(app, line);
+            nf_app_prompt(app, "语音识别失败，请再说一次");
             app->pending_count = 0U;
             app->state = NF_APP_STATE_IDLE;
             return;
@@ -500,6 +553,7 @@ void nf_app_on_error(nf_app_ctx_t *app, const char *message)
         char line[256];
         snprintf(line, sizeof(line), "出错了：%s", message ? message : "");
         show(app, line);
+        nf_app_prompt(app, "出错了，请再说一次");
         reset_answer(app);
         app->state = NF_APP_STATE_IDLE;
     }
@@ -543,6 +597,7 @@ void nf_app_on_voice_failed(nf_app_ctx_t *app, const char *turn_id, const char *
     if ((app->state == NF_APP_STATE_WAITING_REPLY && !app->turn_id[0]) ||
         (turn_id && strcmp(turn_id, app->turn_id) == 0)) {
         show_append(app, "\n（语音合成失败");
+        nf_app_prompt(app, "语音合成失败");
         if (message && message[0]) {
             show_append(app, "：");
             show_append(app, message);

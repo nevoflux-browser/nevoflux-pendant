@@ -161,6 +161,71 @@ static void test_ptt_chunks_and_turn(void)
     printf("[PASS] push-to-talk: 200ms chunks, final -> user_message(voice), spoken answer\n");
 }
 
+/* Stands in for Opus: a 3-byte "packet" per frame, numbered so order shows */
+static int s_enc_resets;
+static uint8_t s_enc_next;
+
+static size_t fake_encode(const int16_t *pcm, uint8_t *out, size_t cap, void *ctx)
+{
+    (void)pcm;
+    (void)ctx;
+    assert(cap >= 3U);
+    out[0] = 0xF8;
+    out[1] = s_enc_next++;
+    out[2] = 0x00;
+    return 3U;
+}
+
+static void fake_encode_reset(void *ctx)
+{
+    (void)ctx;
+    s_enc_resets++;
+    s_enc_next = 0U;
+}
+
+static void test_opus_uplink(void)
+{
+    static nf_app_ctx_t app;
+    memset(&s_cap, 0, sizeof(s_cap));
+    s_enc_resets = 0;
+    nf_app_io_t io = {.send_frame = capture_frame,
+                      .stop_playback = capture_stop,
+                      .encode_frame = fake_encode,
+                      .encode_reset = fake_encode_reset,
+                      .ctx = &s_cap};
+    nf_app_init(&app, 0x00000001U, &io);
+    nf_app_set_link(&app, true);
+
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    assert(s_enc_resets == 1);
+    assert(strstr(last_kind("speech_start"), "\"codec\":\"opus\",\"frame_ms\":20"));
+
+    /* Still one chunk per 10 frames, each frame a u16 LE length + its packet */
+    feed(&app, 25, true);
+    assert(count_kind("speech_chunk") == 2U);
+    const char *chunk = last_kind("speech_chunk");
+    assert(strstr(chunk, "\"seq\":1"));
+    assert(!strstr(chunk, "\"pcm\""));
+    const char *b64 = strstr(chunk, "\"opus\":\"") + 8;
+    uint8_t raw[64];
+    bool ok = false;
+    size_t n = nf_b64_decode(b64, strlen(b64) - 2U, raw, sizeof(raw), &ok);
+    assert(ok);
+    assert(n == 10U * 5U);
+    size_t off = 0U;
+    const uint8_t *pkt = NULL;
+    size_t pkt_len = 0U;
+    for (uint8_t i = 0; i < 10U; ++i) {
+        assert(nf_opus_next_packet(raw, n, &off, &pkt, &pkt_len));
+        assert(pkt_len == 3U && pkt[0] == 0xF8 && pkt[1] == 10U + i);
+    }
+    assert(!nf_opus_next_packet(raw, n, &off, &pkt, &pkt_len));
+
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
+    assert(count_kind("speech_chunk") == 3U); /* the 5-frame tail */
+    printf("[PASS] Opus uplink: codec announced, encoder reset per utterance, packets framed\n");
+}
+
 static void test_tap_is_cancelled_and_silence_is_told(void)
 {
     static nf_app_ctx_t app;
@@ -277,6 +342,48 @@ static void test_text_only_answer_times_out(void)
     printf("[PASS] a turn that ends without voice returns to idle\n");
 }
 
+static void test_link_drop_lets_the_answer_finish(void)
+{
+    static nf_app_ctx_t app;
+    new_app(&app);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    feed(&app, 20, true);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
+    nf_app_on_speech_final(&app, app.pending[0].id, "讲个长故事", true);
+    assert(nf_app_on_voice_audio(&app, "vt_7", 0));
+    assert(nf_app_on_voice_audio(&app, "vt_7", 1));
+
+    /* The relay resets the socket mid-answer: what arrived keeps playing */
+    nf_app_set_link(&app, false);
+    assert(s_cap.stops == 0);
+    assert(app.state == NF_APP_STATE_PLAYING);
+    /* Back within the answer: later sentences of the same turn still play */
+    nf_app_set_link(&app, true);
+    assert(nf_app_on_voice_audio(&app, "vt_7", 2));
+    /* No voice_done will come for it; running dry is the end */
+    nf_app_on_playback_drained(&app);
+    assert(app.state == NF_APP_STATE_IDLE);
+
+    /* BOOT while still offline mid-answer stops it here */
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    feed(&app, 20, true);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
+    nf_app_on_speech_final(&app, app.pending[0].id, "再讲一个", true);
+    assert(nf_app_on_voice_audio(&app, "vt_8", 0));
+    nf_app_set_link(&app, false);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    assert(s_cap.stops == 1 && app.state == NF_APP_STATE_IDLE);
+    nf_app_set_link(&app, true);
+
+    /* Waiting for an answer that will not come now: back to idle at once */
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    feed(&app, 20, true);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
+    nf_app_set_link(&app, false);
+    assert(app.state == NF_APP_STATE_IDLE);
+    printf("[PASS] a dropped link lets the answer already here finish\n");
+}
+
 static void test_reply_wav_to_16k(void)
 {
     /* 24 kHz mono 16-bit WAV, 2400 samples of a constant */
@@ -316,10 +423,12 @@ int main(void)
 {
     test_token_mgr_and_urls();
     test_ptt_chunks_and_turn();
+    test_opus_uplink();
     test_tap_is_cancelled_and_silence_is_told();
     test_20s_split_joins_transcripts();
     test_barge_in_and_meeting();
     test_text_only_answer_times_out();
+    test_link_drop_lets_the_answer_finish();
     test_reply_wav_to_16k();
     printf("[PASS] All NevoFlux app unit tests passed!\n");
     return 0;

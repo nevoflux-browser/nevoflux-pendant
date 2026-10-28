@@ -16,7 +16,7 @@
 #include "freertos/task.h"
 #include "nf_link.h"
 #include "nf_player.h"
-#include "decoder/impl/esp_opus_dec.h"
+#include "encoder/impl/esp_opus_enc.h"
 
 static const char *TAG = "nevoflux";
 #endif
@@ -44,6 +44,48 @@ static void io_stop_playback(void *ctx)
     (void)ctx;
     nf_player_stop();
 }
+
+/*
+ * The microphone goes up as 16 kHz mono Opus, 20 ms packets at 24 kbit/s:
+ * about 4 KB/s base64'd instead of 43 KB/s of PCM, which a phone hotspot to
+ * the relay could not carry. Runs on the mic task (its stack is sized for it).
+ */
+static void *s_opus_enc;
+
+static bool opus_enc_open(void)
+{
+    esp_opus_enc_config_t cfg = ESP_OPUS_ENC_CONFIG_DEFAULT();
+    cfg.sample_rate = ESP_AUDIO_SAMPLE_RATE_16K;
+    cfg.channel = ESP_AUDIO_MONO;
+    cfg.bitrate = 24000;
+    cfg.frame_duration = ESP_OPUS_ENC_FRAME_DURATION_20_MS;
+    cfg.application_mode = ESP_OPUS_ENC_APPLICATION_VOIP;
+    cfg.complexity = 5;
+    cfg.enable_vbr = true;
+    if (esp_opus_enc_open(&cfg, sizeof(cfg), &s_opus_enc) != ESP_AUDIO_ERR_OK) {
+        s_opus_enc = NULL;
+        ESP_LOGE(TAG, "Opus encoder unavailable; sending raw PCM");
+        return false;
+    }
+    return true;
+}
+
+static size_t io_encode_frame(const int16_t *pcm, uint8_t *out, size_t cap, void *ctx)
+{
+    (void)ctx;
+    esp_audio_enc_in_frame_t in = {.buffer = (uint8_t *)pcm, .len = NF_PCM_BYTES_PER_FRAME};
+    esp_audio_enc_out_frame_t o = {.buffer = out, .len = (uint32_t)cap};
+    if (esp_opus_enc_process(s_opus_enc, &in, &o) != ESP_AUDIO_ERR_OK) {
+        return 0U;
+    }
+    return o.encoded_bytes;
+}
+
+static void io_encode_reset(void *ctx)
+{
+    (void)ctx;
+    (void)esp_opus_enc_reset(s_opus_enc);
+}
 #else
 #define APP_LOCK()   ((void)0)
 #define APP_UNLOCK() ((void)0)
@@ -52,8 +94,8 @@ static void io_stop_playback(void *ctx)
 static void on_prov_prompt(const char *device_name, uint32_t timeout_sec, void *user_ctx)
 {
     (void)user_ctx;
-    snprintf(s_app.screen_transcript,
-             sizeof(s_app.screen_transcript),
+    snprintf(s_app.screen_prompt,
+             sizeof(s_app.screen_prompt),
              "收到 [%s] 配对请求，请 %us 内单击 BOOT 键确认",
              device_name ? device_name : "PC",
              (unsigned)timeout_sec);
@@ -64,9 +106,7 @@ static void on_prov_applied(const pendant_config_t *pendant,
                             void *user_ctx)
 {
     (void)user_ctx;
-    snprintf(s_app.screen_transcript,
-             sizeof(s_app.screen_transcript),
-             "凭证已更新，正在重连…");
+    nf_app_prompt(&s_app, "凭证已更新，正在重连…");
 #if defined(ESP_PLATFORM)
     if (pendant && pendant->has_wifi) {
         (void)pendant_wifi_start(pendant->wifi_ssid, pendant->wifi_pass);
@@ -114,31 +154,9 @@ static void play_voice_audio(const char *wav_b64)
     free(wav);
 }
 
-/*
- * One spoken sentence as Opus (what this pendant asks for: `voice_codec`):
- * base64 of length-prefixed 16 kHz mono 20 ms packets -> speaker queue. Each
- * sentence was encoded from a fresh encoder, so the decoder starts fresh too.
- */
+/* One spoken sentence as Opus (what this pendant asks for: `voice_codec`). */
 static void play_voice_opus(const char *opus_b64)
 {
-    static void *s_dec;
-    static int16_t s_pcm[960]; /* up to 60 ms at 16 kHz; packets here are 20 ms */
-    if (!s_dec) {
-        esp_opus_dec_cfg_t cfg = {
-            .sample_rate = 16000,
-            .channel = 1,
-            .frame_duration = ESP_OPUS_DEC_FRAME_DURATION_20_MS,
-            .self_delimited = false,
-        };
-        if (esp_opus_dec_open(&cfg, sizeof(cfg), &s_dec) != ESP_AUDIO_ERR_OK) {
-            s_dec = NULL;
-            ESP_LOGE(TAG, "no Opus decoder");
-            return;
-        }
-    } else {
-        (void)esp_opus_dec_reset(s_dec);
-    }
-
     size_t b64_len = strlen(opus_b64);
     size_t cap = b64_len / 4U * 3U + 3U;
     uint8_t *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -147,25 +165,12 @@ static void play_voice_opus(const char *opus_b64)
     }
     bool ok = false;
     size_t len = nf_b64_decode(opus_b64, b64_len, buf, cap, &ok);
-    size_t off = 0U;
-    const uint8_t *pkt = NULL;
-    size_t pkt_len = 0U;
-    unsigned bad = 0U;
-    while (ok && nf_opus_next_packet(buf, len, &off, &pkt, &pkt_len)) {
-        esp_audio_dec_in_raw_t raw = {.buffer = (uint8_t *)pkt, .len = (uint32_t)pkt_len};
-        esp_audio_dec_out_frame_t out = {.buffer = (uint8_t *)s_pcm, .len = sizeof(s_pcm)};
-        esp_audio_dec_info_t info = {0};
-        if (esp_opus_dec_decode(s_dec, &raw, &out, &info) != ESP_AUDIO_ERR_OK) {
-            ++bad;
-            continue;
-        }
-        (void)nf_player_push(s_pcm, out.decoded_size / sizeof(int16_t));
+    if (!ok) {
+        ESP_LOGW(TAG, "voice_audio opus: not base64; skipped");
+        free(buf);
+        return;
     }
-    if (!ok || off != len || bad > 0U) {
-        ESP_LOGW(TAG, "voice_audio opus: %u of %u bytes used, %u bad packets", (unsigned)off,
-                 (unsigned)len, bad);
-    }
-    free(buf);
+    (void)nf_player_queue_opus(buf, len);
 }
 
 /* One decrypted data-channel message from the head. */
@@ -215,6 +220,15 @@ static void dispatch(const char *plaintext)
     cJSON_Delete(root);
 }
 
+/* 0..100 for the screen's level bars */
+static volatile uint8_t s_mic_level;
+
+static uint8_t level_of(int32_t avg_abs)
+{
+    const int32_t v = (avg_abs - 200) * 100 / 2500; /* speech runs ~500..3000 */
+    return (uint8_t)(v < 0 ? 0 : (v > 100 ? 100 : v));
+}
+
 /**
  * Core 1: 20 ms (640 B) 16 kHz mic frames into the app while it is listening.
  * The mic runs all the time (it shares the bus clock with the speaker), so a
@@ -239,7 +253,9 @@ static void audio_core1_task(void *arg)
                     int32_t v = pcm_samples[i];
                     energy += (v < 0) ? -v : v;
                 }
-                bool is_speech = (energy / (int32_t)NF_PCM_SAMPLES_PER_FRAME) > 350;
+                const int32_t avg = energy / (int32_t)NF_PCM_SAMPLES_PER_FRAME;
+                bool is_speech = avg > 350;
+                s_mic_level = level_of(avg);
                 APP_LOCK();
                 nf_app_on_mic_frame(&s_app, (const uint8_t *)pcm_samples, is_speech);
                 APP_UNLOCK();
@@ -267,7 +283,12 @@ void app_main(void)
         boot_nonce = 1U;
     }
     s_app_lock = xSemaphoreCreateMutex();
-    const nf_app_io_t io = {.send_frame = io_send_frame, .stop_playback = io_stop_playback, .ctx = NULL};
+    const bool opus = opus_enc_open();
+    const nf_app_io_t io = {.send_frame = io_send_frame,
+                            .stop_playback = io_stop_playback,
+                            .encode_frame = opus ? io_encode_frame : NULL,
+                            .encode_reset = opus ? io_encode_reset : NULL,
+                            .ctx = NULL};
     nf_app_init(&s_app, boot_nonce, &io);
     (void)nf_player_init();
 #else
@@ -279,11 +300,9 @@ void app_main(void)
     (void)prov_nvs_load_pendant(&pendant_cfg);
 
     if (!prov_nvs_load_nf_cfg(&s_cred) || !s_cred.is_paired) {
-        snprintf(s_app.screen_transcript,
-                 sizeof(s_app.screen_transcript),
-                 "未配对，请连接电脑 USB 运行 provision.py 或切回 Launcher 配对");
+        nf_app_prompt(&s_app, "未配对，请连接电脑 USB 运行 provision.py 或切回 Launcher 配对");
     } else {
-        snprintf(s_app.screen_transcript, sizeof(s_app.screen_transcript), "正在寻找电脑…");
+        nf_app_prompt(&s_app, "正在寻找电脑…");
     }
 
 #if defined(ESP_PLATFORM)
@@ -291,8 +310,10 @@ void app_main(void)
     (void)pendant_wifi_start(pendant_cfg.has_wifi ? pendant_cfg.wifi_ssid : NULL, pendant_cfg.wifi_pass);
     (void)nf_link_start(&s_cred);
 
-    /* Pin real-time audio task to Core 1; keep Core 0 for WiFi, TLS WebSockets & UI */
-    xTaskCreatePinnedToCore(audio_core1_task, "audio_c1", 6144, NULL, 10, NULL, 1);
+    /* Pin real-time audio task to Core 1; keep Core 0 for WiFi, TLS WebSockets & UI.
+     * Opus encoding wants a deep stack; it never touches flash, so PSRAM holds it. */
+    xTaskCreatePinnedToCoreWithCaps(audio_core1_task, "audio_c1", 32768, NULL, 10, NULL, 1,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     (void)esp_task_wdt_add(NULL);
 #endif
 
@@ -356,14 +377,11 @@ void app_main(void)
         nf_app_set_link(&s_app, online);
         nf_app_tick(&s_app, t_ms);
         if (online && !was_online && s_app.state == NF_APP_STATE_IDLE) {
-            snprintf(s_app.screen_transcript, sizeof(s_app.screen_transcript),
-                     "已连接%s%s\n按住 BOOT 说话", link.session_title[0] ? "：" : "", link.session_title);
+            nf_app_prompt(&s_app, NULL); /* the default hint: connected, hold BOOT */
         } else if (!online && was_online && s_app.state == NF_APP_STATE_IDLE) {
-            snprintf(s_app.screen_transcript, sizeof(s_app.screen_transcript),
-                     link.data_up ? "电脑上的 NevoFlux 未在线" : "正在重新连接电脑…");
+            nf_app_prompt(&s_app, link.data_up ? "电脑上的 NevoFlux 未在线" : "正在重新连接电脑…");
         } else if (link.auth_revoked) {
-            snprintf(s_app.screen_transcript, sizeof(s_app.screen_transcript),
-                     "账号授权已失效，请重新运行 provision.py 配对");
+            nf_app_prompt(&s_app, "账号授权已失效，请重新运行 provision.py 配对");
         }
         APP_UNLOCK();
         was_online = online;
@@ -397,14 +415,28 @@ void app_main(void)
         }
 
         const char *mode_str = "待机";
+        bsp_ui_activity_t activity = BSP_UI_ACT_IDLE;
+        uint8_t level = 0U;
         if (s_app.state == NF_APP_STATE_LISTENING) {
             mode_str = "聆听中…";
+            activity = BSP_UI_ACT_LISTENING;
         } else if (s_app.state == NF_APP_STATE_WAITING_REPLY) {
             mode_str = "思考中…";
+            activity = BSP_UI_ACT_THINKING;
         } else if (s_app.state == NF_APP_STATE_PLAYING) {
-            mode_str = "播报中…";
+            mode_str = "回复中…";
+            activity = BSP_UI_ACT_SPEAKING;
         } else if (s_app.state == NF_APP_STATE_MEETING) {
             mode_str = "会议录音中";
+            activity = BSP_UI_ACT_MEETING;
+        }
+#if defined(ESP_PLATFORM)
+        level = (activity == BSP_UI_ACT_SPEAKING) ? nf_player_level() : s_mic_level;
+#endif
+        /* The conversation itself is not shown: only prompts made of the UI's strings */
+        const char *prompt = s_app.screen_prompt;
+        if (!prompt[0]) {
+            prompt = head_online ? "已连接电脑\n按住 BOOT 说话" : "正在寻找电脑…";
         }
 
         bsp_ui_status_t ui_st = {
@@ -414,7 +446,9 @@ void app_main(void)
             .link_label = link_label,
             .battery_percent = bsp_power_get_battery_percent(NULL),
             .mode_label = mode_str,
-            .transcript = s_app.screen_transcript,
+            .transcript = prompt,
+            .activity = activity,
+            .level = level,
         };
         bsp_display_render_nevoflux(&ui_st);
 

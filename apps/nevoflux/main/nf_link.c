@@ -42,6 +42,8 @@ typedef struct {
     volatile bool connected;
     volatile int  peers;          /* -1 = not told yet */
     volatile uint64_t last_rx_ms;
+    uint64_t      up_ms;          /* when it connected; for the drop log */
+    uint32_t      rx_bytes;       /* received since then */
     /* reassembly of one message across DATA events */
     uint8_t      *rx_buf;
     size_t        rx_len;
@@ -225,15 +227,26 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *event_d
     case WEBSOCKET_EVENT_CONNECTED:
         ch->connected = true;
         ch->last_rx_ms = now_ms();
+        ch->up_ms = ch->last_rx_ms;
+        ch->rx_bytes = 0U;
         ESP_LOGI(TAG, "%s socket connected", ch->is_data ? "data" : "control");
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
     case WEBSOCKET_EVENT_CLOSED:
     case WEBSOCKET_EVENT_ERROR:
+        if (ch->connected) {
+            uint64_t t = now_ms();
+            ESP_LOGW(TAG, "%s socket %s after %us up, %ums since data, %u B in, errno %d",
+                     ch->is_data ? "data" : "control",
+                     id == WEBSOCKET_EVENT_CLOSED ? "closed" : (id == WEBSOCKET_EVENT_ERROR ? "error" : "dropped"),
+                     (unsigned)((t - ch->up_ms) / 1000ULL), (unsigned)ms_since(t, ch->last_rx_ms),
+                     (unsigned)ch->rx_bytes, d ? d->error_handle.esp_transport_sock_errno : 0);
+        }
         ch->connected = false;
         break;
     case WEBSOCKET_EVENT_DATA: {
         ch->last_rx_ms = now_ms();
+        ch->rx_bytes += (uint32_t)d->data_len;
         if (d->op_code >= 0x08) {
             break; /* close / ping / pong: the client answers those itself */
         }
@@ -500,7 +513,7 @@ static void link_task(void *arg)
         memcpy(s_data.key, s_cred.data_key, NF_AES_KEY_SIZE);
         bool opened = chan_open(&s_ctl, ctl_url, !lan) && chan_open(&s_data, data_url, !lan);
         uint64_t t0 = now_ms();
-        while (opened && (!s_ctl.connected || !s_data.connected) && now_ms() - t0 < 15000ULL) {
+        while (opened && (!s_ctl.connected || !s_data.connected) && now_ms() - t0 < 30000ULL) {
             vTaskDelay(pdMS_TO_TICKS(100));
         }
         if (!opened || !s_ctl.connected || !s_data.connected) {
@@ -564,7 +577,11 @@ static void link_task(void *arg)
             continue;
         }
         if (was_stable) {
+            /* A reset of a working socket (the relay path does that every few
+             * minutes on some networks): redial at once so it goes unnoticed */
+            ESP_LOGI(TAG, "link lost after %us; redialling", (unsigned)((now_ms() - up_at) / 1000ULL));
             backoff = NF_BACKOFF_MIN_MS;
+            continue;
         }
         vTaskDelay(pdMS_TO_TICKS(backoff));
         backoff = backoff * 2U > NF_BACKOFF_MAX_MS ? NF_BACKOFF_MAX_MS : backoff * 2U;

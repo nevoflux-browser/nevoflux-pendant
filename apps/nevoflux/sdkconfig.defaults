@@ -46,3 +46,11 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
 # Fewer static (internal, 1.6 KB each) Wi-Fi RX buffers; dynamic ones come from PSRAM.
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+
+# The uplink carries ~45 KB/s of base64 PCM while held; with lwIP's 5.7 KB
+# send buffer and a hotspot's ~200 ms RTT a socket moves under 30 KB/s, so the
+# buffer filled, a write timed out and the WebSocket dropped mid-utterance.
+# lwIP buffers live in PSRAM (SPIRAM_TRY_ALLOCATE_WIFI_LWIP).
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32

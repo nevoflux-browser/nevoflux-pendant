@@ -141,6 +141,11 @@ bool pendant_wifi_start(const char *ssid, const char *password)
     } else {
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
         ESP_ERROR_CHECK(esp_wifi_start()); /* WIFI_EVENT_STA_START triggers the first connect */
+        /* Modem sleep (the default) leaves downlink parked at the AP between
+         * beacons; phone hotspots buffer it badly, so a reply arriving mid-TLS
+         * record stalled past the socket's 10 s read timeout and the WebSocket
+         * dropped. Stay awake: the radio costs some battery, the link stays up. */
+        (void)esp_wifi_set_ps(WIFI_PS_NONE);
         s_started = true;
     }
     ESP_LOGI(TAG, "connecting to \"%s\"", ssid);
