@@ -1,4 +1,6 @@
 #include "nf_link.h"
+#include "nf_addr.h"
+#include "nf_resolve.h"
 #include "nevoflux_app.h"
 #include "pendant_wifi.h"
 
@@ -20,10 +22,13 @@
 #include "freertos/task.h"
 #include "freertos/idf_additions.h"
 #include "mdns.h"
+#include "lwip/netdb.h"
+#include "lwip/sockets.h"
 
 static const char *TAG = "nf_link";
 
-#define NF_ACCOUNT_TOKEN_URL   "https://nevoflux.app/api/auth/token"
+#define NF_ACCOUNT_HOST        "nevoflux.app"
+#define NF_ACCOUNT_TOKEN_URL   "https://" NF_ACCOUNT_HOST "/api/auth/token"
 #define NF_MAX_MESSAGE_BYTES   (2U * 1024U * 1024U) /* a long spoken sentence is ~0.6 MB */
 /* Pointers to PSRAM copies; deep enough for a reply's burst of deltas */
 #define NF_INBOX_DEPTH         96
@@ -402,6 +407,59 @@ static esp_err_t http_event(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
+/*
+ * After a failure to reach the relay: the same TCP connect, from this pendant at
+ * this moment, to Cloudflare and to hosts that are not on it. Only Cloudflare
+ * failing points at the path there; everything failing points at this side (the
+ * hotspot, Wi-Fi, or this firmware). Plain TCP, no TLS; at most once a minute.
+ */
+static int probe_connect_ms(const char *host, const char *port, char ip_out[16])
+{
+    struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
+    struct addrinfo *res = NULL;
+    snprintf(ip_out, 16, "?");
+    if (getaddrinfo(host, port, &hints, &res) != 0 || !res) {
+        return -2; /* DNS */
+    }
+    struct sockaddr_in sa = *(struct sockaddr_in *)res->ai_addr;
+    freeaddrinfo(res);
+    inet_ntoa_r(sa.sin_addr, ip_out, 16);
+    return nf_resolve_tcp_ms(sa.sin_addr.s_addr, (uint16_t)atoi(port), 4000);
+}
+
+static void probe_network(const char *why)
+{
+    static uint64_t last;
+    uint64_t t = now_ms();
+    if (last && t - last < 60000ULL) {
+        return;
+    }
+    last = t;
+    /* Both Cloudflare addresses serve both names; DNS rotates their order. */
+    static const char *const hosts[][2] = {
+        {"relay.nevoflux.app", "443"}, {"104.21.63.34", "443"}, {"104.21.63.34", "80"},
+        {"172.67.169.111", "443"},     {"172.67.169.111", "80"}, /* Cloudflare */
+        {"www.baidu.com", "443"},      {"223.5.5.5", "443"},     /* not Cloudflare */
+    };
+    char line[320];
+    size_t n = 0;
+    for (size_t i = 0; i < sizeof(hosts) / sizeof(hosts[0]); ++i) {
+        char ip[16];
+        int ms = probe_connect_ms(hosts[i][0], hosts[i][1], ip);
+        char what[16];
+        if (ms >= 0) {
+            snprintf(what, sizeof(what), "%dms", ms);
+        } else {
+            snprintf(what, sizeof(what), "%s", ms == -1 ? "TIMEOUT" : ms == -2 ? "DNS-FAIL" : ms == -3 ? "NO-SOCKET" : "REFUSED");
+        }
+        n += (size_t)snprintf(line + n, sizeof(line) - n, "%s%s:%s(%s)=%s", i ? " " : "", hosts[i][0], hosts[i][1], ip, what);
+        if (n >= sizeof(line)) {
+            break;
+        }
+    }
+    ESP_LOGW(TAG, "net probe (%s): %s", why, line);
+}
+
 /* A fresh 15-minute relay JWT. The relay only checks it at the upgrade. */
 static bool fetch_jwt(nf_token_mgr_t *tm)
 {
@@ -484,6 +542,11 @@ static void link_task(void *arg)
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        static bool booted_probe;
+        if (!booted_probe) {
+            booted_probe = true;
+            probe_network("boot, before any connection"); /* no earlier socket can be in the way */
+        }
         if (!mdns_ready && mdns_init() == ESP_OK) {
             (void)mdns_hostname_set("nevoflux-pendant");
             mdns_ready = true;
@@ -493,6 +556,7 @@ static void link_task(void *arg)
         bool lan = mdns_ready && lan_find_head(&head);
         static char ctl_url[1400];
         static char data_url[1400];
+        static char relay_host[64];
         if (lan) {
             ESP_LOGI(TAG, "head found on the LAN at %s:%u", head.ip, (unsigned)head.port);
             (void)nf_lan_build_ws_url(head.ip, head.port, s_cred.control_channel_id, ctl_url, sizeof(ctl_url));
@@ -505,12 +569,20 @@ static void link_task(void *arg)
                 vTaskDelay(pdMS_TO_TICKS(30000));
                 continue;
             }
+            nf_resolve_pick(NF_ACCOUNT_HOST);
             if (!fetch_jwt(&tm)) {
+                nf_resolve_failed(NF_ACCOUNT_HOST);
+                probe_network("token failed");
                 vTaskDelay(pdMS_TO_TICKS(backoff));
                 backoff = backoff * 2U > NF_BACKOFF_MAX_MS ? NF_BACKOFF_MAX_MS : backoff * 2U;
                 continue;
             }
             const char *relay = s_cred.relay_url[0] ? s_cred.relay_url : "wss://relay.nevoflux.app";
+            if (nf_addr_url_host(relay, relay_host, sizeof(relay_host))) {
+                nf_resolve_pick(relay_host);
+            } else {
+                relay_host[0] = '\0';
+            }
             (void)nf_relay_build_ws_url(relay, s_cred.control_channel_id, false, tm.jwt, ctl_url, sizeof(ctl_url));
             (void)nf_relay_build_ws_url(relay, s_cred.data_channel_id, false, tm.jwt, data_url, sizeof(data_url));
         }
@@ -524,6 +596,10 @@ static void link_task(void *arg)
         }
         if (!opened || !s_ctl.connected || !s_data.connected) {
             ESP_LOGW(TAG, "could not reach the head via %s", lan ? "LAN" : "relay");
+            if (!lan) {
+                nf_resolve_failed(relay_host);
+                probe_network("relay failed");
+            }
             chan_close(&s_ctl);
             chan_close(&s_data);
             vTaskDelay(pdMS_TO_TICKS(backoff));
@@ -552,6 +628,9 @@ static void link_task(void *arg)
             if (ms_since(t, s_data.last_rx_ms) > NF_SILENT_DEADLINE_MS ||
                 ms_since(t, s_ctl.last_rx_ms) > NF_SILENT_DEADLINE_MS) {
                 ESP_LOGW(TAG, "socket went silent; reconnecting");
+                if (!lan) {
+                    nf_resolve_failed(relay_host); /* a black-holed path: try the other address first */
+                }
                 break;
             }
             /* On the relay the head is there when the relay says so; it pushes a

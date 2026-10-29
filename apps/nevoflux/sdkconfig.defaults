@@ -54,3 +54,7 @@ CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
 CONFIG_LWIP_TCP_WND_DEFAULT=32768
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+
+# Pin the address of the relay / account host to one that answers (nf_resolve.c):
+# on a hotspot one Cloudflare address can go dead while the other works.
+CONFIG_LWIP_HOOK_NETCONN_EXT_RESOLVE_CUSTOM=y

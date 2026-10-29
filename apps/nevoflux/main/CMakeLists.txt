@@ -3,8 +3,10 @@ idf_component_register(
         "app_main.c"
         "app_state.c"
         "audio_out.c"
+        "nf_addr.c"
         "nf_link.c"
         "nf_player.c"
+        "nf_resolve.c"
         "relay_ws.c"
         "token_mgr.c"
     INCLUDE_DIRS

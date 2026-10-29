@@ -1,4 +1,5 @@
 #include "nevoflux_app.h"
+#include "nf_addr.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -509,6 +510,56 @@ static void test_reply_wav_to_16k(void)
     printf("[PASS] 24 kHz WAV -> 16 kHz PCM\n");
 }
 
+static void test_addr_pick_order_and_dns(void)
+{
+    char host[64];
+    assert(nf_addr_url_host("wss://relay.nevoflux.app", host, sizeof(host)) && strcmp(host, "relay.nevoflux.app") == 0);
+    assert(nf_addr_url_host("wss://relay.x.app:8443/p?q", host, sizeof(host)) && strcmp(host, "relay.x.app") == 0);
+    assert(!nf_addr_url_host("wss://", host, sizeof(host)));
+
+    uint8_t q[128];
+    size_t qlen = nf_addr_dns_query("relay.nevoflux.app", 0x1234, q, sizeof(q));
+    static const uint8_t qname[] = "\x05relay\x08nevoflux\x03" "app";
+    assert(qlen == 12 + sizeof(qname) + 4);
+    assert(q[0] == 0x12 && q[1] == 0x34 && q[2] == 0x01 && q[5] == 1);
+    assert(memcmp(q + 12, qname, sizeof(qname)) == 0); /* sizeof includes the root 0 */
+
+    /* The reply: question echoed, a CNAME, then the two Cloudflare A records */
+    uint8_t r[256];
+    memcpy(r, q, qlen);
+    r[2] = 0x81;
+    r[3] = 0x80;
+    r[7] = 3;
+    size_t off = qlen;
+    static const uint8_t cname[] = {0xC0, 12, 0, 5, 0, 1, 0, 0, 1, 0, 0, 2, 0xC0, 12};
+    memcpy(r + off, cname, sizeof(cname));
+    off += sizeof(cname);
+    static const uint8_t a1[] = {0xC0, 12, 0, 1, 0, 1, 0, 0, 1, 0, 0, 4, 104, 21, 63, 34};
+    static const uint8_t a2[] = {0xC0, 12, 0, 1, 0, 1, 0, 0, 1, 0, 0, 4, 172, 67, 169, 111};
+    memcpy(r + off, a1, sizeof(a1));
+    off += sizeof(a1);
+    memcpy(r + off, a2, sizeof(a2));
+    off += sizeof(a2);
+    uint32_t ips[NF_ADDR_MAX];
+    assert(nf_addr_dns_parse(r, off, 0x1234, ips, NF_ADDR_MAX) == 2);
+    assert(memcmp(&ips[0], a1 + 12, 4) == 0 && memcmp(&ips[1], a2 + 12, 4) == 0);
+    assert(nf_addr_dns_parse(r, off, 0x9999, ips, NF_ADDR_MAX) == -1); /* not our query */
+    assert(nf_addr_dns_parse(r, off - 3, 0x1234, ips, NF_ADDR_MAX) == -1); /* cut short */
+    assert(nf_addr_dns_parse(r, off, 0x1234, ips, 1) == 1);
+    r[3] = 0x83; /* NXDOMAIN */
+    assert(nf_addr_dns_parse(r, off, 0x1234, ips, NF_ADDR_MAX) == 0);
+
+    /* Try order: the one that worked first; the one that just failed last */
+    const uint32_t list[3] = {11, 22, 33};
+    int o[NF_ADDR_MAX];
+    assert(nf_addr_order(list, 3, 0, 0, o) == 3 && o[0] == 0 && o[1] == 1 && o[2] == 2);
+    assert(nf_addr_order(list, 3, 22, 0, o) == 3 && o[0] == 1 && o[1] == 0 && o[2] == 2);
+    assert(nf_addr_order(list, 3, 11, 11, o) == 3 && o[0] == 1 && o[1] == 2 && o[2] == 0);
+    assert(nf_addr_order(list, 3, 33, 11, o) == 3 && o[0] == 2 && o[1] == 1 && o[2] == 0);
+    assert(nf_addr_order(list, 3, 99, 0, o) == 3 && o[0] == 0); /* pinned no longer in DNS */
+    printf("[PASS] address pick order and DNS parse\n");
+}
+
 int main(void)
 {
     test_token_mgr_and_urls();
@@ -521,6 +572,7 @@ int main(void)
     test_link_drop_lets_the_answer_finish();
     test_playing_always_ends();
     test_reply_wav_to_16k();
+    test_addr_pick_order_and_dns();
     printf("[PASS] All NevoFlux app unit tests passed!\n");
     return 0;
 }
