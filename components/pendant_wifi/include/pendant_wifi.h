@@ -34,6 +34,12 @@ bool pendant_wifi_start(const char *ssid, const char *password);
 
 void pendant_wifi_get_status(pendant_wifi_status_t *out);
 
+/** Stop and deinit the Wi-Fi driver, giving its internal RAM back (for BLE). */
+void pendant_wifi_suspend(void);
+/** Start again with the credentials of the last pendant_wifi_start(). */
+bool pendant_wifi_resume(void);
+bool pendant_wifi_is_suspended(void);
+
 /** Block until connected or timeout. */
 bool pendant_wifi_wait_connected(uint32_t timeout_ms);
 

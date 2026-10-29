@@ -1,5 +1,7 @@
 #include "nf_link.h"
 #include "nf_addr.h"
+#include "nf_ble.h"
+#include "nf_ble_frame.h"
 #include "nf_resolve.h"
 #include "nevoflux_app.h"
 #include "pendant_wifi.h"
@@ -44,9 +46,12 @@ static const char *TAG = "nf_link";
 #define NF_SILENT_DEADLINE_MS  (45U * 1000U)
 #define NF_BACKOFF_MIN_MS      1000U
 #define NF_BACKOFF_MAX_MS      60000U
+#define NF_WIFI_GIVEUP_MS      (40U * 1000U) /* no head over Wi-Fi this long: try BLE */
+#define NF_BLE_WINDOW_MS       (30U * 1000U) /* BLE with no head this long: Wi-Fi again */
 
 typedef struct {
     esp_websocket_client_handle_t client;
+    volatile bool ble;            /* carried as records on the BLE link, not a socket */
     bool          is_data;
     uint8_t       key[NF_AES_KEY_SIZE];
     volatile bool connected;
@@ -72,6 +77,7 @@ static nf_chan_t         s_data = {.is_data = true, .peers = -1};
 static nf_link_status_t  s_status;
 static char              s_attached_session[96];
 static char              s_pending_mode[8];   /* set_mode for the link task to send */
+static uint64_t          s_no_head_since;     /* Wi-Fi has had no way to the head since; 0 = it has */
 
 static uint64_t now_ms(void)
 {
@@ -94,7 +100,7 @@ static void *ps_malloc(size_t n)
 
 static bool chan_send_plain(nf_chan_t *ch, const char *plaintext)
 {
-    if (!ch->client || !ch->connected) {
+    if ((!ch->client && !ch->ble) || !ch->connected) {
         return false;
     }
     size_t pt_len = strlen(plaintext);
@@ -106,8 +112,12 @@ static bool chan_send_plain(nf_chan_t *ch, const char *plaintext)
     uint8_t nonce[NF_AES_NONCE_SIZE];
     esp_fill_random(nonce, sizeof(nonce));
     size_t n = nf_channel_encrypt(ch->key, nonce, (const uint8_t *)plaintext, pt_len, wire, cap);
-    bool ok = n > 0U && esp_websocket_client_send_bin(ch->client, (const char *)wire, (int)n,
-                                                      pdMS_TO_TICKS(3000)) == (int)n;
+    bool ok = false;
+    if (n > 0U && ch->ble) {
+        ok = nf_ble_send(ch->is_data ? NF_BLE_REC_DATA : NF_BLE_REC_CTL, wire, n, 5000);
+    } else if (n > 0U) {
+        ok = esp_websocket_client_send_bin(ch->client, (const char *)wire, (int)n, pdMS_TO_TICKS(3000)) == (int)n;
+    }
     free(wire);
     return ok;
 }
@@ -300,6 +310,18 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *event_d
     default:
         break;
     }
+}
+
+/* A record from the head over BLE: the same sealed frames a socket carries */
+static void on_ble_record(uint8_t type, uint8_t *buf, size_t len)
+{
+    nf_chan_t *ch = type == NF_BLE_REC_CTL ? &s_ctl : (type == NF_BLE_REC_DATA ? &s_data : NULL);
+    if (!ch || !ch->ble) {
+        return;
+    }
+    ch->last_rx_ms = now_ms();
+    ch->rx_bytes += (uint32_t)len;
+    on_message(ch, buf, len, true);
 }
 
 static void chan_close(nf_chan_t *ch)
@@ -518,6 +540,134 @@ static void set_mode(nf_link_mode_t m)
     xSemaphoreGive(s_lock);
 }
 
+/* A set_mode the app asked for, on the control channel */
+static void send_pending_mode(void)
+{
+    char mode[sizeof(s_pending_mode)];
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    snprintf(mode, sizeof(mode), "%s", s_pending_mode);
+    s_pending_mode[0] = '\0';
+    xSemaphoreGive(s_lock);
+    if (mode[0] && s_attached_session[0]) {
+        char json[192];
+        snprintf(json, sizeof(json), "{\"kind\":\"set_mode\",\"sessionId\":\"%.100s\",\"mode\":\"%s\"}",
+                 s_attached_session, mode);
+        ESP_LOGI(TAG, "asking the head for %s mode", mode);
+        if (!chan_send_frame(&s_ctl, json)) {
+            ESP_LOGW(TAG, "set_mode not sent");
+        }
+    }
+}
+
+static void set_on_ble(bool on)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_status.on_ble = on;
+    xSemaphoreGive(s_lock);
+}
+
+/* One BLE link to the head, from its hello until the link drops */
+static void ble_linked(void)
+{
+    memcpy(s_ctl.key, s_cred.control_key, NF_AES_KEY_SIZE);
+    memcpy(s_data.key, s_cred.data_key, NF_AES_KEY_SIZE);
+    uint64_t t = now_ms();
+    nf_chan_t *chans[2] = {&s_ctl, &s_data};
+    for (int i = 0; i < 2; ++i) {
+        chans[i]->ble = true;
+        chans[i]->peers = 1; /* whoever connected is the head, as on the LAN */
+        chans[i]->last_rx_ms = t;
+        chans[i]->up_ms = t;
+        chans[i]->rx_bytes = 0U;
+    }
+    char hello[300];
+    int n = snprintf(hello, sizeof(hello), "{\"c\":\"%s\",\"d\":\"%s\"}", s_cred.control_channel_id,
+                     s_cred.data_channel_id);
+    if (n > 0 && (size_t)n < sizeof(hello) && nf_ble_send(NF_BLE_REC_HELLO, (const uint8_t *)hello, (size_t)n, 3000)) {
+        s_ctl.connected = true;
+        s_data.connected = true;
+        set_mode(NF_LINK_BLE);
+        ESP_LOGI(TAG, "linked to the head over BLE");
+        (void)chan_send_frame(&s_ctl, "{\"kind\":\"sync\"}");
+        while (nf_ble_ready() && !s_restart) {
+            vTaskDelay(pdMS_TO_TICKS(250));
+            send_pending_mode();
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            s_status.data_up = true;
+            s_status.head_online = true;
+            xSemaphoreGive(s_lock);
+        }
+        ESP_LOGW(TAG, "BLE link lost after %us", (unsigned)((now_ms() - t) / 1000ULL));
+    }
+    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+    for (int i = 0; i < 2; ++i) {
+        chans[i]->connected = false;
+        chans[i]->ble = false;
+        chans[i]->peers = -1;
+    }
+    xSemaphoreGive(s_tx_lock);
+    set_mode(NF_LINK_DOWN);
+    s_attached_session[0] = '\0';
+}
+
+/*
+ * Wi-Fi is off for this: BLE up, the head given a window to connect in (and
+ * again after every link that drops), then BLE down so Wi-Fi can come back.
+ */
+static void run_ble(void)
+{
+    char tag[9];
+    nf_lan_channel_tag(s_cred.data_channel_id, tag);
+    if (!nf_ble_start(tag, on_ble_record)) {
+        ESP_LOGW(TAG, "BLE would not start");
+        return;
+    }
+    set_on_ble(true);
+    uint64_t waiting_since = now_ms();
+    while (!s_restart && pendant_wifi_is_suspended()) {
+        if (nf_ble_ready()) {
+            ble_linked();
+            waiting_since = now_ms();
+            continue;
+        }
+        if (now_ms() - waiting_since >= NF_BLE_WINDOW_MS) {
+            ESP_LOGI(TAG, "no head over BLE in %us", (unsigned)(NF_BLE_WINDOW_MS / 1000U));
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+    nf_ble_stop();
+    set_on_ble(false);
+}
+
+/* Wi-Fi has given no way to the head for long enough: try BLE for a while */
+static void maybe_try_ble(bool *mdns_ready)
+{
+    uint64_t t = now_ms();
+    if (!s_no_head_since) {
+        s_no_head_since = t;
+        return;
+    }
+    pendant_wifi_status_t wifi;
+    pendant_wifi_get_status(&wifi);
+    bool no_wifi_at_all = wifi.state == PENDANT_WIFI_OFF; /* never configured: nothing to wait for */
+    if ((!no_wifi_at_all && t - s_no_head_since < NF_WIFI_GIVEUP_MS) || s_restart) {
+        return;
+    }
+    ESP_LOGW(TAG, "no way to the head over Wi-Fi for %us; trying BLE", (unsigned)((t - s_no_head_since) / 1000ULL));
+    if (*mdns_ready) {
+        mdns_free();
+        *mdns_ready = false;
+    }
+    pendant_wifi_suspend();
+    run_ble();
+    if (pendant_wifi_is_suspended()) {
+        ESP_LOGI(TAG, "back to Wi-Fi");
+        (void)pendant_wifi_resume();
+    }
+    s_no_head_since = now_ms(); /* a whole Wi-Fi window again */
+}
+
 static void link_task(void *arg)
 {
     (void)arg;
@@ -536,6 +686,8 @@ static void link_task(void *arg)
             continue;
         }
         if (!pendant_wifi_wait_connected(5000)) {
+            vTaskDelay(pdMS_TO_TICKS(200)); /* returns at once when Wi-Fi was never configured */
+            maybe_try_ble(&mdns_ready);
             continue;
         }
         ESP_LOGI(TAG, "heap: internal free %u (largest %u), psram free %u",
@@ -574,6 +726,7 @@ static void link_task(void *arg)
                 nf_resolve_failed(NF_ACCOUNT_HOST);
                 probe_network("token failed");
                 vTaskDelay(pdMS_TO_TICKS(backoff));
+                maybe_try_ble(&mdns_ready);
                 backoff = backoff * 2U > NF_BACKOFF_MAX_MS ? NF_BACKOFF_MAX_MS : backoff * 2U;
                 continue;
             }
@@ -604,10 +757,12 @@ static void link_task(void *arg)
             chan_close(&s_data);
             vTaskDelay(pdMS_TO_TICKS(backoff));
             backoff = backoff * 2U > NF_BACKOFF_MAX_MS ? NF_BACKOFF_MAX_MS : backoff * 2U;
+            maybe_try_ble(&mdns_ready);
             continue;
         }
 
         set_mode(lan ? NF_LINK_LAN : NF_LINK_RELAY);
+        s_no_head_since = 0;
         (void)chan_send_frame(&s_ctl, "{\"kind\":\"sync\"}");
         uint64_t up_at = now_ms();
         uint64_t last_ping = up_at;
@@ -636,20 +791,7 @@ static void link_task(void *arg)
             /* On the relay the head is there when the relay says so; it pushes a
              * peers notice when it arrives, so an empty channel is just held open
              * (an idle socket costs nothing) rather than redialled. */
-            char mode[sizeof(s_pending_mode)];
-            xSemaphoreTake(s_lock, portMAX_DELAY);
-            snprintf(mode, sizeof(mode), "%s", s_pending_mode);
-            s_pending_mode[0] = '\0';
-            xSemaphoreGive(s_lock);
-            if (mode[0] && s_attached_session[0]) {
-                char json[192];
-                snprintf(json, sizeof(json), "{\"kind\":\"set_mode\",\"sessionId\":\"%.100s\",\"mode\":\"%s\"}",
-                         s_attached_session, mode);
-                ESP_LOGI(TAG, "asking the head for %s mode", mode);
-                if (!chan_send_frame(&s_ctl, json)) {
-                    ESP_LOGW(TAG, "set_mode not sent");
-                }
-            }
+            send_pending_mode();
             bool online = lan ? true : (s_data.peers > 0);
             xSemaphoreTake(s_lock, portMAX_DELAY);
             s_status.data_up = true;

@@ -22,6 +22,7 @@ SRCS := \
 	../main/audio_out.c \
 	../main/app_state.c \
 	../main/nf_addr.c \
+	../main/nf_ble_frame.c \
 	test_nevoflux_app.c
 
 TARGET := test_nevoflux_app.out
@@ -30,7 +31,7 @@ TARGET := test_nevoflux_app.out
 
 all: $(TARGET)
 
-$(TARGET): $(SRCS) ../main/nevoflux_app.h ../main/nf_addr.h
+$(TARGET): $(SRCS) ../main/nevoflux_app.h ../main/nf_addr.h ../main/nf_ble_frame.h
 	$(CC) $(CFLAGS) $(SRCS) -o $(TARGET) $(LDFLAGS)
 
 test: $(TARGET)

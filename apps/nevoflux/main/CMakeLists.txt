@@ -4,6 +4,8 @@ idf_component_register(
         "app_state.c"
         "audio_out.c"
         "nf_addr.c"
+        "nf_ble.c"
+        "nf_ble_frame.c"
         "nf_link.c"
         "nf_player.c"
         "nf_resolve.c"
@@ -23,4 +25,5 @@ idf_component_register(
         esp_timer
         json
         mbedtls
+        bt
 )

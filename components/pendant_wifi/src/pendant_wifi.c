@@ -24,6 +24,10 @@ static uint32_t             s_retry_ms = RETRY_MIN_MS;
 static bool                 s_inited;
 static bool                 s_started;
 static bool                 s_reconfiguring;
+static bool                 s_driver_up;   /* esp_wifi_init done (undone by suspend) */
+static bool                 s_suspended;
+static char                 s_ssid[33];
+static char                 s_pass[65];
 
 static void retry_cb(void *arg)
 {
@@ -44,6 +48,9 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         s_status.state = PENDANT_WIFI_FAILED;
         s_status.ip[0] = '\0';
         s_status.last_reason = ev ? ev->reason : 0;
+        if (s_suspended) {
+            return; /* our own stop: no retry */
+        }
         if (s_reconfiguring) {
             /* Our own disconnect before applying new credentials; pendant_wifi_start() reconnects. */
             s_reconfiguring = false;
@@ -84,18 +91,27 @@ static bool wifi_stack_init(void)
     }
     esp_netif_t *netif = esp_netif_create_default_wifi_sta();
     (void)esp_netif_set_hostname(netif, "nevoflux-pendant");
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, NULL));
+    const esp_timer_create_args_t targs = { .callback = retry_cb, .name = "wifi_retry" };
+    ESP_ERROR_CHECK(esp_timer_create(&targs, &s_retry_timer));
+    s_inited = true;
+    return true;
+}
 
+/* The driver itself: undone by pendant_wifi_suspend() to give its RAM back */
+static bool wifi_driver_init(void)
+{
+    if (s_driver_up) {
+        return true;
+    }
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     if (esp_wifi_init(&cfg) != ESP_OK) {
         return false;
     }
     (void)esp_wifi_set_storage(WIFI_STORAGE_RAM); /* credentials live in our own `pendant` namespace */
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, NULL));
-    const esp_timer_create_args_t targs = { .callback = retry_cb, .name = "wifi_retry" };
-    ESP_ERROR_CHECK(esp_timer_create(&targs, &s_retry_timer));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    s_inited = true;
+    s_driver_up = true;
     return true;
 }
 
@@ -113,7 +129,7 @@ bool pendant_wifi_start(const char *ssid, const char *password)
         ESP_LOGW(TAG, "no SSID configured; provision with `provision.py --wifi-only`");
         return false;
     }
-    if (!wifi_stack_init()) {
+    if (!wifi_stack_init() || !wifi_driver_init()) {
         ESP_LOGE(TAG, "WiFi stack init failed");
         return false;
     }
@@ -129,6 +145,9 @@ bool pendant_wifi_start(const char *ssid, const char *password)
     wc.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
 
     snprintf(s_status.ssid, sizeof(s_status.ssid), "%s", ssid);
+    snprintf(s_ssid, sizeof(s_ssid), "%s", ssid);
+    snprintf(s_pass, sizeof(s_pass), "%s", password);
+    s_suspended = false;
     s_status.ip[0] = '\0';
     s_status.state = PENDANT_WIFI_CONNECTING;
     s_retry_ms = RETRY_MIN_MS;
@@ -152,12 +171,51 @@ bool pendant_wifi_start(const char *ssid, const char *password)
     return true;
 }
 
+void pendant_wifi_suspend(void)
+{
+    if (s_suspended) {
+        return;
+    }
+    s_suspended = true;
+    if (s_inited) {
+        (void)esp_timer_stop(s_retry_timer);
+        xEventGroupClearBits(s_events, WIFI_CONNECTED_BIT);
+    }
+    if (s_driver_up) {
+        (void)esp_wifi_disconnect();
+        (void)esp_wifi_stop();
+        (void)esp_wifi_deinit();
+        s_driver_up = false;
+        s_started = false;
+    }
+    s_status.state = PENDANT_WIFI_OFF;
+    s_status.ip[0] = '\0';
+    ESP_LOGI(TAG, "suspended");
+}
+
+bool pendant_wifi_resume(void)
+{
+    if (!s_suspended) {
+        return true;
+    }
+    s_suspended = false;
+    if (s_ssid[0] == '\0') {
+        return false; /* never configured: nothing to resume */
+    }
+    return pendant_wifi_start(s_ssid, s_pass);
+}
+
+bool pendant_wifi_is_suspended(void)
+{
+    return s_suspended;
+}
+
 void pendant_wifi_get_status(pendant_wifi_status_t *out)
 {
     if (!out) {
         return;
     }
-    if (s_status.state == PENDANT_WIFI_CONNECTED) {
+    if (s_status.state == PENDANT_WIFI_CONNECTED && s_driver_up) {
         wifi_ap_record_t ap;
         if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
             s_status.rssi = ap.rssi;
@@ -183,6 +241,10 @@ void pendant_wifi_format_line(char *out, size_t cap)
     }
     pendant_wifi_status_t st;
     pendant_wifi_get_status(&st);
+    if (s_suspended) {
+        snprintf(out, cap, "WiFi 已暂停，正在使用蓝牙");
+        return;
+    }
     switch (st.state) {
     case PENDANT_WIFI_OFF:
         snprintf(out, cap, "WiFi 未配置");

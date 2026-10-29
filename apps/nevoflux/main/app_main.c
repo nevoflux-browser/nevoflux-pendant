@@ -461,7 +461,7 @@ void app_main(void)
         const bool wifi_up = (wifi_st.state == PENDANT_WIFI_CONNECTED);
         const bool link_up = link.data_up;
         const bool head_online = online;
-        const char *link_label = (link.mode == NF_LINK_LAN) ? "局域网" : "Relay";
+        const char *link_label = link.on_ble ? "蓝牙" : (link.mode == NF_LINK_LAN) ? "局域网" : "Relay";
 #else
         const bool wifi_up = pendant_cfg.has_wifi;
         const bool link_up = s_cred.is_paired;

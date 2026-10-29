@@ -1,5 +1,6 @@
 #include "nevoflux_app.h"
 #include "nf_addr.h"
+#include "nf_ble_frame.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -560,6 +561,79 @@ static void test_addr_pick_order_and_dns(void)
     printf("[PASS] address pick order and DNS parse\n");
 }
 
+typedef struct {
+    int     count;
+    uint8_t types[8];
+    size_t  lens[8];
+    uint8_t first[8];
+} rec_capture_t;
+
+static void capture_rec(uint8_t type, uint8_t *buf, size_t len, void *ctx)
+{
+    rec_capture_t *c = (rec_capture_t *)ctx;
+    assert(c->count < 8);
+    assert(buf[len] == 0); /* NUL after the payload */
+    c->types[c->count] = type;
+    c->lens[c->count] = len;
+    c->first[c->count] = len ? buf[0] : 0;
+    c->count++;
+    free(buf);
+}
+
+static void test_ble_records(void)
+{
+    /* Three records back to back: hello, an empty one, a 600-byte data frame */
+    static uint8_t stream[4 + 5 + 4 + 4 + 600];
+    size_t n = 0;
+    nf_ble_rec_header(NF_BLE_REC_HELLO, 5, stream + n);
+    n += 4;
+    memcpy(stream + n, "{\"c\"}", 5);
+    n += 5;
+    nf_ble_rec_header(NF_BLE_REC_CTL, 0, stream + n);
+    n += 4;
+    nf_ble_rec_header(NF_BLE_REC_DATA, 600, stream + n);
+    n += 4;
+    for (int i = 0; i < 600; ++i) {
+        stream[n++] = (uint8_t)(i + 7);
+    }
+    assert(n == sizeof(stream));
+
+    /* Any cut into ATT packets gives the same records */
+    static const size_t cuts[] = {1, 3, 4, 20, 244, sizeof(stream)};
+    for (size_t c = 0; c < sizeof(cuts) / sizeof(cuts[0]); ++c) {
+        nf_ble_rx_t rx;
+        nf_ble_rx_init(&rx, malloc, free);
+        rec_capture_t cap = {0};
+        for (size_t off = 0; off < n; off += cuts[c]) {
+            size_t k = n - off < cuts[c] ? n - off : cuts[c];
+            assert(nf_ble_rx_feed(&rx, stream + off, k, capture_rec, &cap));
+        }
+        assert(cap.count == 3);
+        assert(cap.types[0] == NF_BLE_REC_HELLO && cap.lens[0] == 5 && cap.first[0] == '{');
+        assert(cap.types[1] == NF_BLE_REC_CTL && cap.lens[1] == 0);
+        assert(cap.types[2] == NF_BLE_REC_DATA && cap.lens[2] == 600 && cap.first[2] == 7);
+        assert(rx.buf == NULL);
+    }
+
+    /* A half record is dropped on reset; the next one parses cleanly */
+    nf_ble_rx_t rx;
+    nf_ble_rx_init(&rx, malloc, free);
+    rec_capture_t cap = {0};
+    assert(nf_ble_rx_feed(&rx, stream + 13, 10, capture_rec, &cap)); /* into the data record */
+    nf_ble_rx_reset(&rx);
+    assert(nf_ble_rx_feed(&rx, stream, 9, capture_rec, &cap) && cap.count == 1);
+
+    /* Oversize is refused */
+    uint8_t big[4];
+    nf_ble_rec_header(NF_BLE_REC_DATA, NF_BLE_REC_MAX + 1U, big);
+    assert(!nf_ble_rx_feed(&rx, big, 4, capture_rec, &cap));
+
+    uint8_t tag[4];
+    assert(nf_ble_tag_bytes("0a1B2c3D", tag) && tag[0] == 0x0a && tag[1] == 0x1b && tag[3] == 0x3d);
+    assert(!nf_ble_tag_bytes("0a1B2c3", tag) && !nf_ble_tag_bytes("0a1B2c3g", tag));
+    printf("[PASS] BLE records survive any packet cut\n");
+}
+
 int main(void)
 {
     test_token_mgr_and_urls();
@@ -573,6 +647,7 @@ int main(void)
     test_playing_always_ends();
     test_reply_wav_to_16k();
     test_addr_pick_order_and_dns();
+    test_ble_records();
     printf("[PASS] All NevoFlux app unit tests passed!\n");
     return 0;
 }

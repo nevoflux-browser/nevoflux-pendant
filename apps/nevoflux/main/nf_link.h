@@ -18,6 +18,11 @@ extern "C" {
  * Otherwise the relay (`wss://relay/?c=&t=<15-min JWT>`), re-probing the LAN
  * every couple of minutes so walking in the door moves the pendant off it.
  *
+ * No way to the head over Wi-Fi for a while (no network, no internet, head
+ * not on the LAN): Wi-Fi off, BLE on (nf_ble.h) for a window the head can
+ * connect in, then Wi-Fi again. Never both at once: one radio, and internal
+ * RAM holds one stack at a time.
+ *
  * Two sockets, same as the phone portal: control (sync -> sessions -> attach
  * the most recently updated conversation) and data (speech up, answers down).
  * Every binary frame is `WireMessage` JSON sealed with that channel's key.
@@ -27,6 +32,7 @@ typedef enum {
     NF_LINK_DOWN  = 0,
     NF_LINK_LAN   = 1,
     NF_LINK_RELAY = 2,
+    NF_LINK_BLE   = 3,
 } nf_link_mode_t;
 
 typedef struct {
@@ -35,6 +41,7 @@ typedef struct {
     bool           head_online;   /* the head is on the channel (peers > 0, or LAN) */
     bool           attached;      /* a conversation is bound to the data channel */
     bool           auth_revoked;  /* account token refused: re-pair */
+    bool           on_ble;        /* Wi-Fi is off and BLE is up (linked or waiting for the head) */
     char           session_title[64];
 } nf_link_status_t;
 
