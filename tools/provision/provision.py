@@ -683,19 +683,42 @@ def _open_line_transport(port: str, baud: int):
 
         import serial  # type: ignore
 
-        with serial.Serial(port, baud, timeout=1.0) as ser:
+        # DTR/RTS low before the port opens: on Windows pyserial raises both on
+        # open, and the ESP32-S3 USB-Serial-JTAG takes that as a reset request.
+        ser = serial.Serial()
+        ser.port = port
+        ser.baudrate = baud
+        ser.timeout = 1.0
+        ser.dtr = False
+        ser.rts = False
+        ser.open()
+        with ser:
             ser.reset_input_buffer()
 
-            def rpc(line: str) -> str:
+            def ask(line: str, wait_sec: float) -> str | None:
                 ser.write((line + "\n").encode("utf-8"))
                 ser.flush()
-                deadline = time.monotonic() + 5.0
+                deadline = time.monotonic() + wait_sec
                 while time.monotonic() < deadline:
                     raw = ser.readline().decode("utf-8", errors="ignore").strip()
                     # Firmware log lines share the console; only JSON lines are RPC replies.
                     if raw.startswith("{") and raw.endswith("}"):
                         return raw
-                raise TimeoutError(f"No JSON reply from pendant on {port} (is the Launcher running?)")
+                return None
+
+            # A pendant that rebooted anyway (or is still booting) answers once
+            # its app is up: knock with a harmless status query for a while first.
+            boot_deadline = time.monotonic() + 20.0
+            while ask(json.dumps({"cmd": "prov.status"}), 2.0) is None:
+                if time.monotonic() > boot_deadline:
+                    raise TimeoutError(f"No JSON reply from pendant on {port} (is the Launcher running?)")
+            ser.reset_input_buffer()
+
+            def rpc(line: str) -> str:
+                raw = ask(line, 5.0)
+                if raw is None:
+                    raise TimeoutError(f"No JSON reply from pendant on {port} (is the Launcher running?)")
+                return raw
 
             yield rpc
 
