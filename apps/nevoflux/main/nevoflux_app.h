@@ -101,17 +101,19 @@ int nf_wire_wrap_frame(const char *frame_json, char *out, size_t out_cap);
 #define NF_MEETING_SILENCE_FRAMES   40U
 /*
  * The answer's text is over (turn_end / stream_end) and no voice_audio yet: wait
- * this long for speech before giving up. The first sentence lands 1-5 s after
- * the text with Kokoro and ~9 s with MOSS; a reply the head made text-only
- * (its voice engine still loading, or voice off) never speaks at all.
+ * this long for speech before giving up. A reply the head makes text-only says
+ * so (voice_failed) at once; this is only for one that says nothing at all. The
+ * first sentence lands 1-5 s after the text with Kokoro on a GPU, but MOSS on a
+ * busy CPU took 14 s, so it has to be generous.
  */
-#define NF_VOICE_GRACE_MS           15000ULL
+#define NF_VOICE_GRACE_MS           60000ULL
 /*
  * Speaker dry this long mid-answer with nothing more arriving: the rest of it
- * (or its voice_done) was lost on the way, so stop waiting. Longer than the
- * head takes to synthesise one long sentence at its slowest engine.
+ * (or its voice_done) was lost on the way, so stop waiting. The head ends every
+ * spoken answer with voice_done, so this is only the fallback; MOSS on a CPU
+ * left 36 s between sentences.
  */
-#define NF_PLAYBACK_STALL_MS        20000ULL
+#define NF_PLAYBACK_STALL_MS        90000ULL
 #define NF_MAX_PENDING_FINALS       8U
 #define NF_ID_CAP                   48U
 

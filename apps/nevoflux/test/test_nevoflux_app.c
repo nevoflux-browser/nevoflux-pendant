@@ -454,6 +454,25 @@ static void test_playing_always_ends(void)
     nf_app_tick(&app, 5000ULL + 2ULL * NF_PLAYBACK_STALL_MS + 20ULL);
     assert(app.state == NF_APP_STATE_IDLE);
 
+    /* A slow head (MOSS on a CPU): 14 s to the first sentence, 36 s between them */
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    feed(&app, 20, true);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
+    nf_app_on_speech_final(&app, app.pending[0].id, "慢一点", true);
+    nf_app_tick(&app, 100000ULL);
+    nf_app_on_turn_end(&app);
+    nf_app_tick(&app, 114000ULL);
+    assert(app.state == NF_APP_STATE_WAITING_REPLY);
+    assert(nf_app_on_voice_audio(&app, "vt_slow", 0));
+    nf_app_tick(&app, 118000ULL);
+    nf_app_on_playback_drained(&app);
+    nf_app_tick(&app, 154000ULL);
+    assert(app.state == NF_APP_STATE_PLAYING);
+    assert(nf_app_on_voice_audio(&app, "vt_slow", 1));
+    nf_app_on_voice_done(&app, "vt_slow");
+    nf_app_on_playback_drained(&app);
+    assert(app.state == NF_APP_STATE_IDLE);
+
     /* One sentence failing mid-answer does not end it */
     answer_playing(&app, "vt_4");
     nf_app_on_voice_failed(&app, "vt_4", "sentence synthesis failed");
