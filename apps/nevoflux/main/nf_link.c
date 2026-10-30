@@ -48,6 +48,9 @@ static const char *TAG = "nf_link";
 #define NF_BACKOFF_MAX_MS      60000U
 #define NF_WIFI_GIVEUP_MS      (40U * 1000U) /* no head over Wi-Fi this long: try BLE */
 #define NF_BLE_WINDOW_MS       (30U * 1000U) /* BLE with no head this long: Wi-Fi again */
+/* A LAN link that drops (the head restarting, a Wi-Fi blip): keep to the LAN this
+ * long before the relay, or the pendant sits on the relay until the next LAN probe */
+#define NF_LAN_RETRY_MS        (15U * 1000U)
 
 typedef struct {
     esp_websocket_client_handle_t client;
@@ -705,12 +708,25 @@ static void link_task(void *arg)
         }
 
         nf_lan_head_t head = {0};
+        static nf_lan_head_t last_head;
+        static uint64_t lan_retry_until; /* 0: no LAN link just dropped */
         bool lan = mdns_ready && lan_find_head(&head);
+        bool lan_retry = !lan && lan_retry_until && now_ms() < lan_retry_until && last_head.ip[0];
+        if (lan) {
+            last_head = head;
+        } else if (lan_retry) {
+            /* Its mDNS record may not be back yet: dial where it just was */
+            head = last_head;
+            lan = true;
+        } else {
+            lan_retry_until = 0;
+        }
         static char ctl_url[1400];
         static char data_url[1400];
         static char relay_host[64];
         if (lan) {
-            ESP_LOGI(TAG, "head found on the LAN at %s:%u", head.ip, (unsigned)head.port);
+            ESP_LOGI(TAG, "%s the LAN at %s:%u", lan_retry ? "redialling the head on" : "head found on", head.ip,
+                     (unsigned)head.port);
             (void)nf_lan_build_ws_url(head.ip, head.port, s_cred.control_channel_id, ctl_url, sizeof(ctl_url));
             (void)nf_lan_build_ws_url(head.ip, head.port, s_cred.data_channel_id, data_url, sizeof(data_url));
         } else {
@@ -744,7 +760,8 @@ static void link_task(void *arg)
         memcpy(s_data.key, s_cred.data_key, NF_AES_KEY_SIZE);
         bool opened = chan_open(&s_ctl, ctl_url, !lan) && chan_open(&s_data, data_url, !lan);
         uint64_t t0 = now_ms();
-        while (opened && (!s_ctl.connected || !s_data.connected) && now_ms() - t0 < 30000ULL) {
+        uint64_t open_wait = lan ? 5000ULL : 30000ULL; /* a LAN head answers at once or is not there */
+        while (opened && (!s_ctl.connected || !s_data.connected) && now_ms() - t0 < open_wait) {
             vTaskDelay(pdMS_TO_TICKS(100));
         }
         if (!opened || !s_ctl.connected || !s_data.connected) {
@@ -755,6 +772,10 @@ static void link_task(void *arg)
             }
             chan_close(&s_ctl);
             chan_close(&s_data);
+            if (lan_retry) {
+                vTaskDelay(pdMS_TO_TICKS(1000)); /* the head is on its way back */
+                continue;
+            }
             vTaskDelay(pdMS_TO_TICKS(backoff));
             backoff = backoff * 2U > NF_BACKOFF_MAX_MS ? NF_BACKOFF_MAX_MS : backoff * 2U;
             maybe_try_ble(&mdns_ready);
@@ -762,6 +783,7 @@ static void link_task(void *arg)
         }
 
         set_mode(lan ? NF_LINK_LAN : NF_LINK_RELAY);
+        lan_retry_until = 0;
         s_no_head_since = 0;
         (void)chan_send_frame(&s_ctl, "{\"kind\":\"sync\"}");
         uint64_t up_at = now_ms();
@@ -808,6 +830,9 @@ static void link_task(void *arg)
         }
 
         bool was_stable = now_ms() - up_at >= 5000ULL;
+        if (lan && !switch_to_lan && !s_restart) {
+            lan_retry_until = now_ms() + NF_LAN_RETRY_MS;
+        }
         chan_close(&s_ctl);
         xSemaphoreTake(s_tx_lock, portMAX_DELAY);
         chan_close(&s_data);
