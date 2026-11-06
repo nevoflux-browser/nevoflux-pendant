@@ -7,6 +7,7 @@ idf_component_register(
         "nf_ble.c"
         "nf_ble_frame.c"
         "nf_link.c"
+        "nf_meet_buf.c"
         "nf_player.c"
         "nf_resolve.c"
         "relay_ws.c"

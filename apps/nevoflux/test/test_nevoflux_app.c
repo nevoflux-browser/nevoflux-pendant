@@ -653,6 +653,218 @@ static void test_ble_records(void)
     printf("[PASS] BLE records survive any packet cut\n");
 }
 
+
+static void test_meet_buf_ring(void)
+{
+    static uint8_t mem[64];
+    nf_meet_buf_t b;
+    nf_meet_buf_init(&b, mem, sizeof(mem));
+    assert(nf_meet_buf_empty(&b));
+    uint8_t p[20];
+    memset(p, 'a', sizeof(p));
+    /* 27-byte records: two fit, the third pushes the first out as a hole */
+    assert(nf_meet_buf_put(&b, 1, 1000, p, 20));
+    p[0] = 'b';
+    assert(nf_meet_buf_put(&b, 1, 1200, p, 20));
+    p[0] = 'c';
+    assert(nf_meet_buf_put(&b, 2, 1400, p, 20));
+    assert(b.records == 2U && b.gap_count == 1U && b.gaps[0][0] == 1000U);
+    p[0] = 'd';
+    assert(nf_meet_buf_put(&b, 1, 9000, p, 20)); /* drops 'b' at 1200: joins the hole */
+    assert(b.gap_count == 1U && b.gaps[0][1] == 1200U);
+    uint8_t type;
+    uint32_t off;
+    uint8_t out[32];
+    assert(nf_meet_buf_peek(&b, &type, &off, out, sizeof(out)) == 20 && type == 2 && off == 1400U && out[0] == 'c');
+    nf_meet_buf_pop(&b);
+    assert(nf_meet_buf_peek(&b, &type, &off, out, sizeof(out)) == 20 && out[0] == 'd' && off == 9000U); /* wrapped */
+    nf_meet_buf_pop(&b);
+    assert(nf_meet_buf_empty(&b) && nf_meet_buf_peek(&b, &type, &off, out, sizeof(out)) == -1);
+    assert(!nf_meet_buf_put(&b, 1, 0, p, 60)); /* can never fit */
+    char json[64];
+    nf_meet_buf_gaps_json(&b, json, sizeof(json));
+    assert(strcmp(json, "[[1000,1200]]") == 0);
+    nf_meet_buf_t none;
+    nf_meet_buf_init(&none, NULL, 0U);
+    assert(!nf_meet_buf_put(&none, 1, 0, p, 1));
+    nf_meet_buf_gaps_json(&none, json, sizeof(json));
+    assert(strcmp(json, "[]") == 0);
+    printf("[PASS] meeting offline buffer: ring, wrap, oldest dropped as one hole\n");
+}
+
+static void test_meeting_note_words(void)
+{
+    assert(nf_meeting_is_note("标记一下，预算要再确认"));
+    assert(nf_meeting_is_note("，记一下明天开会"));
+    assert(nf_meeting_is_note(" 备注：张三负责"));
+    assert(nf_meeting_is_note("表记一下这个"));
+    assert(!nf_meeting_is_note("刚才说的截止日期是哪天"));
+    assert(!nf_meeting_is_note("我想标记一下")); /* only at the start */
+    assert(!nf_meeting_is_note(""));
+    printf("[PASS] meeting: notes are told from questions by their first words\n");
+}
+
+static int s_cues;
+static void fake_cue(void *ctx)
+{
+    (void)ctx;
+    s_cues++;
+}
+
+static uint8_t s_meet_mem[NF_MEET_OFFLINE_BYTES];
+static int s_meet_allocs, s_meet_frees;
+static void *fake_meet_alloc(size_t n)
+{
+    assert(n == sizeof(s_meet_mem));
+    s_meet_allocs++;
+    return s_meet_mem;
+}
+static void fake_meet_free(void *p)
+{
+    assert(p == s_meet_mem);
+    s_meet_frees++;
+}
+
+static void new_meeting_app(nf_app_ctx_t *app)
+{
+    memset(&s_cap, 0, sizeof(s_cap));
+    s_cues = s_meet_allocs = s_meet_frees = 0;
+    nf_app_io_t io = {.send_frame = capture_frame,
+                      .stop_playback = capture_stop,
+                      .cue = fake_cue,
+                      .meet_alloc = fake_meet_alloc,
+                      .meet_free = fake_meet_free,
+                      .ctx = &s_cap};
+    nf_app_init(app, 0x00000001U, &io);
+    nf_app_set_link(app, true);
+    nf_app_tick(app, 1000ULL);
+}
+
+static void test_meeting_sentences_questions_and_notes(void)
+{
+    static nf_app_ctx_t app;
+    new_meeting_app(&app);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_DOUBLE_CLICK);
+    assert(app.state == NF_APP_STATE_MEETING && s_meet_allocs == 1);
+    const char *ms = last_kind("meeting_start");
+    assert(ms && strstr(ms, app.meet.id));
+
+    /* A sentence: tagged with the meeting and when in it, ended with how loud it was */
+    nf_app_tick(&app, 6000ULL);
+    feed(&app, 30, true);
+    feed(&app, NF_MEETING_SILENCE_FRAMES, false);
+    const char *st = last_kind("speech_start");
+    char want[96];
+    snprintf(want, sizeof(want), "\"meeting_id\":\"%s\",\"offset_ms\":5000}", app.meet.id);
+    assert(st && strstr(st, want) && !strstr(st, "late"));
+    const char *en = last_kind("speech_end");
+    assert(en && strstr(en, "\"rms_db\":-17.5"));
+    char seg[NF_ID_CAP];
+    snprintf(seg, sizeof(seg), "%s", app.utterance_id);
+    nf_app_on_speech_final(&app, seg, "预算要再确认", true);
+    assert(app.meet.sentences == 1U);
+    nf_app_tick(&app, 7000ULL);
+    assert(strstr(app.screen_prompt, "会议录音中 00:06") && strstr(app.screen_prompt, "已记录 1 句"));
+
+    /* Holding BOOT: a question, not a meeting sentence; the meeting carries on */
+    feed(&app, 10, true); /* a sentence under way when BOOT goes down */
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    assert(app.state == NF_APP_STATE_MEETING_ASKING);
+    const char *q_start = last_kind("speech_start");
+    assert(!strstr(q_start, "meeting_id"));
+    feed(&app, 40, true);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
+    assert(app.state == NF_APP_STATE_MEETING);
+    char ask[NF_ID_CAP];
+    snprintf(ask, sizeof(ask), "%s", app.meet.ask_id);
+    assert(ask[0]);
+    nf_app_on_speech_final(&app, ask, "刚才说的截止日期是哪天", true);
+    const char *a = last_kind("meeting_ask");
+    assert(a && strstr(a, "截止日期") && strstr(a, ask) && strstr(a, "\"offset_ms\":6000"));
+    assert(app.meet.sentences == 1U && count_kind("user_message") == 0U);
+    /* Only its answer plays, and the meeting pauses for it */
+    assert(!nf_app_on_voice_audio(&app, "someone_else", 0));
+    assert(nf_app_on_voice_audio(&app, ask, 0));
+    assert(app.state == NF_APP_STATE_MEETING_ANSWERING);
+    nf_app_on_voice_done(&app, ask);
+    nf_app_on_playback_drained(&app);
+    assert(app.state == NF_APP_STATE_MEETING && !app.meet.answer_turn[0]);
+
+    /* A note: told by its first words, answered with a tone and nothing spoken */
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    feed(&app, 40, true);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
+    nf_app_on_speech_final(&app, app.meet.ask_id, "标记一下，预算", true);
+    assert(last_kind("meeting_note") && strstr(last_kind("meeting_note"), "标记一下") && s_cues == 1);
+    assert(!app.meet.answer_turn[0]);
+    nf_app_tick(&app, 7500ULL);
+    assert(strcmp(app.screen_prompt, "已记下批注") == 0);
+
+    /* A tap is nothing */
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_RELEASE);
+    assert(app.state == NF_APP_STATE_MEETING && strstr(s_cap.sent[s_cap.count - 1U], "too_short"));
+
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_DOUBLE_CLICK);
+    assert(app.state == NF_APP_STATE_IDLE && !app.meet.active && s_meet_frees == 1);
+    const char *me = last_kind("meeting_end");
+    assert(me && strstr(me, "\"gaps\":[]"));
+    nf_app_on_meeting_summary(&app, "x", 3U);
+    assert(strstr(app.screen_prompt, "共 3 条待办"));
+    printf("[PASS] meeting: tagged sentences, a question answered mid-meeting, a note, the end\n");
+}
+
+static void test_meeting_offline_and_back(void)
+{
+    static nf_app_ctx_t app;
+    new_meeting_app(&app);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_DOUBLE_CLICK);
+    feed(&app, 20, true); /* a sentence under way when the head goes */
+    nf_app_set_link(&app, false);
+    assert(app.state == NF_APP_STATE_MEETING && app.meet.active);
+    size_t sent = s_cap.count;
+    nf_app_tick(&app, 4000ULL);
+    feed(&app, 20, true);
+    feed(&app, NF_MEETING_SILENCE_FRAMES, false);
+    feed(&app, 50, true);
+    feed(&app, NF_MEETING_SILENCE_FRAMES, false);
+    assert(s_cap.count == sent); /* nothing went anywhere */
+    assert(!nf_meet_buf_empty(&app.meet.buf));
+    assert(app.meet.sentences == 0U);
+    nf_app_tick(&app, 5000ULL);
+    assert(strstr(app.screen_prompt, "离线录音中 00:04"));
+    /* No questions offline */
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_PRESS_START);
+    assert(app.state == NF_APP_STATE_MEETING);
+    nf_app_tick(&app, 5100ULL);
+    assert(strcmp(app.screen_prompt, "未连接，问题未发送") == 0);
+
+    /* Back: the meeting is announced again, then what was kept goes up in order */
+    nf_app_set_link(&app, true);
+    assert(strstr(s_cap.sent[s_cap.count - 1U], "meeting_start"));
+    size_t before = count_kind("speech_chunk");
+    /* Raw PCM here (no encoder), so a tick's 8 KB carries about one chunk */
+    for (int i = 0; i < 50 && !nf_meet_buf_empty(&app.meet.buf); ++i) {
+        nf_app_tick(&app, 5200ULL + 20ULL * (uint64_t)i);
+    }
+    assert(nf_meet_buf_empty(&app.meet.buf));
+    assert(count_kind("speech_chunk") > before);
+    const char *late = last_kind("speech_start");
+    assert(late && strstr(late, "\"late\":true") && strstr(late, "\"offset_ms\":3000"));
+    assert(count_kind("speech_end") == 2U);
+    /* Leaving offline: meeting_end waits behind the audio */
+    feed(&app, 20, true);
+    nf_app_set_link(&app, false);
+    nf_app_on_key_event(&app, BSP_KEY_EVENT_BOOT_DOUBLE_CLICK);
+    assert(!app.meet.active && count_kind("meeting_end") == 0U && s_meet_frees == 0);
+    nf_app_set_link(&app, true);
+    for (int i = 0; i < 50 && s_meet_frees == 0; ++i) {
+        nf_app_tick(&app, 9000ULL + 20ULL * (uint64_t)i);
+    }
+    assert(count_kind("meeting_end") == 1U && s_meet_frees == 1);
+    printf("[PASS] meeting: recorded offline, sent up in order on reconnect, ended after it\n");
+}
+
 int main(void)
 {
     test_token_mgr_and_urls();
@@ -667,6 +879,10 @@ int main(void)
     test_reply_wav_to_16k();
     test_addr_pick_order_and_dns();
     test_ble_records();
+    test_meet_buf_ring();
+    test_meeting_note_words();
+    test_meeting_sentences_questions_and_notes();
+    test_meeting_offline_and_back();
     printf("[PASS] All NevoFlux app unit tests passed!\n");
     return 0;
 }

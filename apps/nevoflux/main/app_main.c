@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +44,29 @@ static void io_stop_playback(void *ctx)
 {
     (void)ctx;
     nf_player_stop();
+}
+
+/* 120 ms at 1.2 kHz, faded at both ends: "noted" */
+static void io_cue(void *ctx)
+{
+    (void)ctx;
+    static int16_t tone[16000 * 120 / 1000];
+    const size_t n = sizeof(tone) / sizeof(tone[0]);
+    for (size_t i = 0; i < n; ++i) {
+        const size_t edge = i < n - i ? i : n - i;
+        const float env = edge < 160U ? (float)edge / 160.0f : 1.0f;
+        tone[i] = (int16_t)(6000.0f * env * sinf(2.0f * 3.14159265f * 1200.0f * (float)i / 16000.0f));
+    }
+    (void)nf_player_push(tone, n);
+}
+
+static void *io_meet_alloc(size_t n)
+{
+    void *p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!p) {
+        ESP_LOGW(TAG, "no PSRAM for the meeting's offline buffer; offline audio will be lost");
+    }
+    return p;
 }
 
 /*
@@ -279,6 +303,10 @@ static void dispatch(const char *plaintext)
         nf_app_on_voice_done(&s_app, jstr(frame, "turn_id"));
     } else if (strcmp(kind, "voice_failed") == 0) {
         nf_app_on_voice_failed(&s_app, jstr(frame, "turn_id"), jstr(frame, "message"));
+    } else if (strcmp(kind, "meeting_summary_ready") == 0) {
+        const cJSON *todos = cJSON_GetObjectItem(frame, "todos");
+        nf_app_on_meeting_summary(&s_app, jstr(frame, "meeting_id"),
+                                  cJSON_IsNumber(todos) ? (uint32_t)todos->valuedouble : 0U);
     }
     APP_UNLOCK();
     cJSON_Delete(root);
@@ -307,7 +335,7 @@ static void audio_core1_task(void *arg)
     for (;;) {
         (void)esp_task_wdt_reset();
         const nf_app_state_t st = s_app.state;
-        if (st == NF_APP_STATE_LISTENING || st == NF_APP_STATE_MEETING) {
+        if (st == NF_APP_STATE_LISTENING || st == NF_APP_STATE_MEETING || st == NF_APP_STATE_MEETING_ASKING) {
             size_t read_cnt = 0U;
             if (bsp_audio_read_mic(pcm_samples, NF_PCM_SAMPLES_PER_FRAME, &read_cnt, 25U) &&
                 read_cnt == NF_PCM_SAMPLES_PER_FRAME) {
@@ -352,6 +380,9 @@ void app_main(void)
                             .stop_playback = io_stop_playback,
                             .encode_frame = opus ? io_encode_frame : NULL,
                             .encode_reset = opus ? io_encode_reset : NULL,
+                            .cue = io_cue,
+                            .meet_alloc = io_meet_alloc,
+                            .meet_free = free,
                             .ctx = NULL};
     nf_app_init(&s_app, boot_nonce, &io);
     (void)nf_player_init();
@@ -501,6 +532,12 @@ void app_main(void)
         } else if (s_app.state == NF_APP_STATE_MEETING) {
             mode_str = "会议录音中";
             activity = BSP_UI_ACT_MEETING;
+        } else if (s_app.state == NF_APP_STATE_MEETING_ASKING) {
+            mode_str = "聆听中…";
+            activity = BSP_UI_ACT_LISTENING;
+        } else if (s_app.state == NF_APP_STATE_MEETING_ANSWERING) {
+            mode_str = "回复中…";
+            activity = BSP_UI_ACT_SPEAKING;
         }
 #if defined(ESP_PLATFORM)
         level = (activity == BSP_UI_ACT_SPEAKING) ? nf_player_level() : s_mic_level;

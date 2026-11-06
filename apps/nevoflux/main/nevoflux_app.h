@@ -7,6 +7,7 @@
 #include "bsp_143c.h"
 #include "nf_proto.h"
 #include "prov_nvs.h"
+#include "nf_meet_buf.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -115,6 +116,13 @@ int nf_wire_wrap_frame(const char *frame_json, char *out, size_t out_cap);
  */
 #define NF_PLAYBACK_STALL_MS        90000ULL
 #define NF_MAX_PENDING_FINALS       8U
+/*
+ * A meeting keeps recording while the head is out of reach, into this much
+ * PSRAM: Opus at 24 kbit/s is ~3 KB/s, so about eleven minutes.
+ */
+#define NF_MEET_OFFLINE_BYTES       (2U * 1024U * 1024U)
+/* Sent up from the offline buffer per app tick (20 ms): ~400 KB/s, a few times real time */
+#define NF_MEET_REPLAY_BYTES        8192U
 #define NF_ID_CAP                   48U
 
 /* =========================================================================
@@ -127,6 +135,8 @@ typedef enum {
     NF_APP_STATE_WAITING_REPLY = 2, /* Released BOOT: transcribing, then thinking */
     NF_APP_STATE_PLAYING       = 3, /* Playing the spoken answer; BOOT barges in */
     NF_APP_STATE_MEETING       = 4, /* Hands-free continuous VAD recording */
+    NF_APP_STATE_MEETING_ASKING    = 5, /* BOOT held in a meeting: a question or a note */
+    NF_APP_STATE_MEETING_ANSWERING = 6, /* The answer to it is playing; recording paused */
 } nf_app_state_t;
 
 typedef struct {
@@ -141,6 +151,11 @@ typedef struct {
      */
     size_t (*encode_frame)(const int16_t *pcm, uint8_t *out, size_t cap, void *ctx);
     void (*encode_reset)(void *ctx);
+    /* A short tone: a note was taken. Optional. */
+    void (*cue)(void *ctx);
+    /* The meeting's offline buffer (NF_MEET_OFFLINE_BYTES); NULL alloc = none */
+    void *(*meet_alloc)(size_t n);
+    void (*meet_free)(void *p);
     void *ctx;
 } nf_app_io_t;
 
@@ -182,6 +197,25 @@ typedef struct {
     uint64_t turn_end_ms;
     uint64_t now_ms;
 
+    /* The meeting being recorded */
+    struct {
+        bool     active;
+        char     id[NF_ID_CAP];
+        uint64_t started_ms;
+        uint32_t sentences;
+        bool     seg;              /* the open utterance is one of its sentences */
+        double   seg_power;        /* sum of each frame's mean square, for rms_db */
+        uint32_t seg_frames;
+        char     ask_id[NF_ID_CAP];      /* a question/note awaiting its transcript */
+        uint64_t ask_offset_ms;
+        char     answer_turn[NF_ID_CAP]; /* a question awaiting or being answered */
+        uint64_t answer_since_ms;
+        char     notice[96];       /* shown instead of the status line until notice_until_ms */
+        uint64_t notice_until_ms;
+        uint8_t *mem;
+        nf_meet_buf_t buf;
+    } meet;
+
     char ptt_accum_text[1024];
     /* What was said and answered (kept for logs/tests; the screen does not show it) */
     char screen_transcript[1024];
@@ -219,6 +253,16 @@ void nf_app_on_voice_failed(nf_app_ctx_t *app, const char *turn_id, const char *
 
 /** The speaker ran out of queued audio. */
 void nf_app_on_playback_drained(nf_app_ctx_t *app);
+
+/** The head wrote a meeting's minutes. */
+void nf_app_on_meeting_summary(nf_app_ctx_t *app, const char *meeting_id, uint32_t todos);
+
+/**
+ * True if a question asked in a meeting is a note instead: it starts with one
+ * of 标记 / 记一下 / 备注 (or how they are misheard). Leading spaces and
+ * punctuation are skipped.
+ */
+bool nf_meeting_is_note(const char *text);
 
 /* =========================================================================
  * 5. Spoken answer: WAV (base64-decoded) -> 16 kHz mono PCM

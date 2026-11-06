@@ -4,7 +4,7 @@ CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 \
 	-I../../../components/nf_proto/include \
 	-I../../../components/prov_nvs/include \
 	-I../../../components/bsp_143c/include
-LDFLAGS := -lcrypto
+LDFLAGS := -lcrypto -lm
 
 SRCS := \
 	../../../components/nf_proto/src/nfa1.c \
@@ -23,6 +23,7 @@ SRCS := \
 	../main/app_state.c \
 	../main/nf_addr.c \
 	../main/nf_ble_frame.c \
+	../main/nf_meet_buf.c \
 	test_nevoflux_app.c
 
 TARGET := test_nevoflux_app.out
@@ -31,7 +32,7 @@ TARGET := test_nevoflux_app.out
 
 all: $(TARGET)
 
-$(TARGET): $(SRCS) ../main/nevoflux_app.h ../main/nf_addr.h ../main/nf_ble_frame.h
+$(TARGET): $(SRCS) ../main/nevoflux_app.h ../main/nf_addr.h ../main/nf_ble_frame.h ../main/nf_meet_buf.h
 	$(CC) $(CFLAGS) $(SRCS) -o $(TARGET) $(LDFLAGS)
 
 test: $(TARGET)
