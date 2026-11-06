@@ -66,7 +66,7 @@ int main(void)
     assert(prov_rpc_handle_line(&rpc, "{\"cmd\":\"prov.offer\",\"device\":\"Sam-ThinkPad\"}", 20000ULL, resp, sizeof(resp)) > 0);
     assert(prov_rpc_confirm_boot(&rpc, 23000ULL));
     assert(prov_rpc_handle_line(&rpc, "{\"cmd\":\"prov.status\"}", 23500ULL, resp, sizeof(resp)) > 0);
-    assert(strcmp(resp, "{\"status\":\"ready\"}") == 0);
+    assert(strcmp(resp, "{\"status\":\"ready\",\"paired\":false}") == 0); /* not paired, no identity set */
 
     /* 6. Now prov.write succeeds and persists both pendant WiFi and nf_cfg credentials */
     assert(prov_rpc_handle_line(&rpc, write_cmd, 24000ULL, resp, sizeof(resp)) > 0);
@@ -120,7 +120,16 @@ int main(void)
     assert(strcmp(loaded_pendant.wifi_pass, "p@ss \"q\"") == 0);
     assert(prov_nvs_load_nf_cfg(&loaded_cred) && loaded_cred.is_paired);
     assert(prov_rpc_handle_line(&rpc, "{\"cmd\":\"prov.status\"}", 32500ULL, resp, sizeof(resp)) > 0);
-    assert(strcmp(resp, "{\"status\":\"idle\"}") == 0);
+    assert(strcmp(resp, "{\"status\":\"idle\",\"paired\":true,"
+                        "\"control_channel_id\":\"2f1c4a90-7b3e-4d1a-9c58-0e6a2b7d4f31\"}") == 0);
+
+    /* 9. With its identity set, prov.status names the pendant and the app answering */
+    prov_rpc_set_identity(&rpc, "NevoFlux-A1B2", "nevoflux");
+    assert(prov_rpc_handle_line(&rpc, "{\"cmd\":\"prov.status\"}", 33000ULL, resp, sizeof(resp)) > 0);
+    assert(strstr(resp, "\"status\":\"idle\",\"paired\":true,") == resp + 1);
+    assert(strstr(resp, ",\"name\":\"NevoFlux-A1B2\",\"fw\":\"nevoflux\"}"));
+    /* Never the keys or the token */
+    assert(!strstr(resp, "1111") && !strstr(resp, "sess_tok"));
 
     printf("[PASS] All prov_nvs unit tests passed!\n");
     return 0;

@@ -80,12 +80,20 @@ typedef struct {
     prov_prompt_cb_t  on_prompt;
     prov_applied_cb_t on_applied;
     void             *user_ctx;
+    char              name[24]; /* "NevoFlux-A1B2", reported by prov.status ("" = not said) */
+    char              fw[16];   /* the app answering: "nevoflux", "launcher" */
 } prov_rpc_ctx_t;
 
 void prov_rpc_init(prov_rpc_ctx_t *ctx,
                    prov_prompt_cb_t on_prompt,
                    prov_applied_cb_t on_applied,
                    void *user_ctx);
+
+/**
+ * What prov.status says this pendant is, so a provisioning host (the desktop
+ * agent) can name it and find the pairing it holds. Either may be NULL.
+ */
+void prov_rpc_set_identity(prov_rpc_ctx_t *ctx, const char *name, const char *fw);
 
 /**
  * Called by button handler when the user physically clicks BOOT during the 15s window.

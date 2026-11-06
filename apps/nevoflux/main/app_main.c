@@ -8,6 +8,7 @@
 #if defined(ESP_PLATFORM)
 #include "cJSON.h"
 #include "esp_heap_caps.h"
+#include "esp_mac.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_task_wdt.h"
@@ -359,6 +360,19 @@ static void audio_core1_task(void *arg)
 }
 #endif
 
+/* "NevoFlux-A1B2": the last two bytes of the BT address, the name the pendant advertises over BLE */
+static void prov_identify(prov_rpc_ctx_t *ctx, const char *fw)
+{
+    char name[24] = "";
+#if defined(ESP_PLATFORM)
+    uint8_t mac[6];
+    if (esp_read_mac(mac, ESP_MAC_BT) == ESP_OK) {
+        snprintf(name, sizeof(name), "NevoFlux-%02X%02X", mac[4], mac[5]);
+    }
+#endif
+    prov_rpc_set_identity(ctx, name, fw);
+}
+
 void app_main(void)
 {
     /* 1. Hard brick-recovery check: hold BOOT >= 2s at boot -> erase otadata -> Launcher */
@@ -390,6 +404,7 @@ void app_main(void)
     nf_app_init(&s_app, boot_nonce, NULL);
 #endif
     prov_rpc_init(&s_prov_rpc, on_prov_prompt, on_prov_applied, NULL);
+    prov_identify(&s_prov_rpc, "nevoflux");
 
     pendant_config_t pendant_cfg;
     (void)prov_nvs_load_pendant(&pendant_cfg);

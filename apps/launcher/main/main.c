@@ -7,6 +7,7 @@
 
 #if defined(ESP_PLATFORM)
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_system.h"
@@ -88,6 +89,19 @@ static bool boot_into_partition(pendant_system_t target_sys, pendant_config_t *p
     return true;
 }
 
+/* "NevoFlux-A1B2": the last two bytes of the BT address, the name the pendant advertises over BLE */
+static void prov_identify(prov_rpc_ctx_t *ctx, const char *fw)
+{
+    char name[24] = "";
+#if defined(ESP_PLATFORM)
+    uint8_t mac[6];
+    if (esp_read_mac(mac, ESP_MAC_BT) == ESP_OK) {
+        snprintf(name, sizeof(name), "NevoFlux-%02X%02X", mac[4], mac[5]);
+    }
+#endif
+    prov_rpc_set_identity(ctx, name, fw);
+}
+
 void app_main(void)
 {
     (void)prov_nvs_init();
@@ -106,6 +120,7 @@ void app_main(void)
 
     prov_rpc_ctx_t rpc_ctx;
     prov_rpc_init(&rpc_ctx, on_prov_prompt, on_prov_applied, NULL);
+    prov_identify(&rpc_ctx, "launcher");
     const bool ble_ok = launcher_ble_prov_init();
     bsp_display_set_ble_button(ble_ok, false);
     uint64_t ble_close_at_ms = 0ULL; /* 0 = BLE provisioning closed */

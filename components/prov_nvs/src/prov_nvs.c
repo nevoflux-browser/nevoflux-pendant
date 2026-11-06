@@ -378,6 +378,15 @@ void prov_rpc_init(prov_rpc_ctx_t *ctx,
     ctx->user_ctx = user_ctx;
 }
 
+void prov_rpc_set_identity(prov_rpc_ctx_t *ctx, const char *name, const char *fw)
+{
+    if (!ctx) {
+        return;
+    }
+    snprintf(ctx->name, sizeof(ctx->name), "%s", name ? name : "");
+    snprintf(ctx->fw, sizeof(ctx->fw), "%s", fw ? fw : "");
+}
+
 static void check_confirm_expiry(prov_rpc_ctx_t *ctx, uint64_t now_ms)
 {
     if (ctx->state != PROV_STATE_IDLE &&
@@ -436,7 +445,27 @@ int prov_rpc_handle_line(prov_rpc_ctx_t *ctx,
         const char *st = (ctx->state == PROV_STATE_CONFIRMED)    ? "ready"
                        : (ctx->state == PROV_STATE_WAIT_CONFIRM) ? "wait_boot"
                                                                  : "idle";
-        return snprintf(resp_buf, resp_cap, "{\"status\":\"%s\"}", st);
+        /*
+         * Also who this is and which pairing it holds: the control channel id
+         * names a pairing on the desktop, it is not a secret (the keys and the
+         * token never leave over this port).
+         */
+        nf_credentials_t cred;
+        const bool paired = prov_nvs_load_nf_cfg(&cred) && cred.is_paired && cred.control_channel_id[0];
+        int n = snprintf(resp_buf, resp_cap, "{\"status\":\"%s\",\"paired\":%s", st, paired ? "true" : "false");
+        if (n > 0 && (size_t)n < resp_cap && paired) {
+            n += snprintf(resp_buf + n, resp_cap - (size_t)n, ",\"control_channel_id\":\"%s\"", cred.control_channel_id);
+        }
+        if (n > 0 && (size_t)n < resp_cap && ctx->name[0]) {
+            n += snprintf(resp_buf + n, resp_cap - (size_t)n, ",\"name\":\"%s\"", ctx->name);
+        }
+        if (n > 0 && (size_t)n < resp_cap && ctx->fw[0]) {
+            n += snprintf(resp_buf + n, resp_cap - (size_t)n, ",\"fw\":\"%s\"", ctx->fw);
+        }
+        if (n > 0 && (size_t)n < resp_cap) {
+            n += snprintf(resp_buf + n, resp_cap - (size_t)n, "}");
+        }
+        return n;
     }
 
     if (strcmp(cmd, "prov.write") == 0) {
